@@ -3,7 +3,7 @@ name = "alignment"
 version = "1.0.0"
 description = "CS 336 Spring 2026 Assignment 5: Reasoning RL"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"  # Python 3.13 not yet supported for some deps
+requires-python = ">=3.13,<3.14"  # Python 3.13 not yet supported for some deps
 dependencies = [
     "accelerate>=1.5.2",
     "math-verify[antlr4-13-2]>=0.7.0",
@@ -19,11 +19,13 @@ dependencies = [
 [project.optional-dependencies]
 gpu = [
     "alpaca-eval>=0.6.6",
-    # No official flash-attn 2.8.3 wheel exists for Torch 2.10; use the
-    # community cp312/cu12/Torch 2.10 wheel to avoid source builds on Modal.
-    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # No official flash-attn 2.8.3 wheel exists for Torch 2.11; use the
+    # community cp313/cu12/Torch 2.11 wheel to avoid source builds on Modal.
+    "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch",
-    "vllm==0.19.1",
+    "torchvision",
+    "vllm==0.23",
+    "sentencepiece>=0.2.1",
     "wandb>=0.26.0",
 ]
 plots = [
@@ -36,12 +38,15 @@ include = ["cs336_alignment*"]
 [tool.uv]
 package = true
 environments = [
-    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # "sys_platform == 'darwin' and platform_machine == 'arm64'",
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
 [tool.uv.sources]
 torch = [
+    { index = "pytorch-cu129", extra = "gpu", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
     { index = "pytorch-cu129", extra = "gpu", marker = "sys_platform == 'linux'" },
 ]
 [[tool.uv.index]]
