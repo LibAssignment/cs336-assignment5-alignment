@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import torch
+import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,7 @@ def generate_completions(
         prompt_batches = [prompts[start : start + batch_size] for start in range(0, len(prompts), batch_size)]
 
     completions = []
-    for prompt_batch in prompt_batches:
+    for prompt_batch in tqdm.tqdm(prompt_batches):
         payload = {
             "model": model_id,
             "prompt": prompt_batch,
