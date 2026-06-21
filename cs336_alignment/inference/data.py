@@ -1,12 +1,13 @@
 from transformers import PreTrainedTokenizer, PreTrainedModel
 from dataclasses import dataclass
+from typing import Callable
 import torch
 
 @dataclass
 class TokenizedPromptAndOutput:
-  input_ids: torch.Tensor
-  labels: torch.Tensor
-  response_mask: torch.Tensor
+  input_ids: torch.Tensor # shape (batch_size, seq_length)
+  labels: torch.Tensor # shape (batch_size, seq_length)
+  response_mask: torch.Tensor # shape (batch_size, seq_length)
 
 def tokenize_prompt_and_output(
   prompt_strs: list[str],
@@ -52,8 +53,8 @@ class ResponseLogProbs:
 
 def get_response_log_probs(
   model: PreTrainedModel,
-  input_ids: torch.Tensor,
-  labels: torch.Tensor,
+  input_ids: torch.Tensor, # shape (batch_size, seq_length)
+  labels: torch.Tensor, # shape (batch_size, seq_length)
   return_token_entropy: bool = False,
 ) -> ResponseLogProbs:
   with torch.no_grad():
@@ -71,3 +72,21 @@ def get_response_log_probs(
       probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
       token_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
     return ResponseLogProbs(log_probs=log_probs, token_entropy=token_entropy)
+
+
+@dataclass
+class RolloutRewards:
+  raw_rewards: torch.Tensor # shape (batch_size,)
+  metadata: dict[str, float] | None = None
+
+
+def compute_rollout_rewards(
+  reward_fn: Callable[[str, str], dict[str, float]],
+  rollout_responses: list[str],
+  repeated_ground_truths: list[str],
+) -> RolloutRewards:
+  rewards = [reward_fn(response, ground_truth) for (response, ground_truth) in zip(rollout_responses, repeated_ground_truths)]
+  raw_rewards = torch.tensor([reward["reward"] for reward in rewards])
+  keys = rewards[0].keys() if len(rewards) > 0 else []
+  metadata = {key: sum([reward[key] for reward in rewards])/len(rewards) for key in keys}
+  return RolloutRewards(raw_rewards=raw_rewards, metadata=metadata)

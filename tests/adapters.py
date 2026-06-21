@@ -116,7 +116,9 @@ def run_compute_rollout_rewards(
                 Reward statistics to log. At minimum, include the mean total
                 and format rewards over the rollout batch.
     """
-    raise NotImplementedError
+    from cs336_alignment.inference.data import compute_rollout_rewards
+    result = compute_rollout_rewards(reward_fn, rollout_responses, repeated_ground_truths)
+    return (result.raw_rewards, result.metadata or {})
 
 
 def run_compute_group_normalized_rewards(
