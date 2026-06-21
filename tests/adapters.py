@@ -46,7 +46,8 @@ def run_tokenize_prompt_and_output(
                 with labels, with value 1 where the corresponding label token
                 is part of the response and 0 otherwise.
     """
-    raise NotImplementedError
+    from cs336_alignment.inference.data import tokenize_prompt_and_output
+    return tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer).__dict__
 
 
 def run_get_response_log_probs(
@@ -325,7 +326,7 @@ def run_grpo_train_step(
 
 
 """
-The below adapters are used in the optional 
+The below adapters are used in the optional
 RLHF / safety part of the Alignment assignment.
 """
 
