@@ -1,6 +1,6 @@
 from transformers import PreTrainedTokenizer, PreTrainedModel
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Literal
 import torch
 
 @dataclass
@@ -90,3 +90,32 @@ def compute_rollout_rewards(
   keys = rewards[0].keys() if len(rewards) > 0 else []
   metadata = {key: sum([reward[key] for reward in rewards])/len(rewards) for key in keys}
   return RolloutRewards(raw_rewards=raw_rewards, metadata=metadata)
+
+
+@dataclass
+class GroupRewards:
+  advantages: torch.Tensor # shape (batch_size,)
+  metadata: dict[str, float] | None = None
+
+
+def compute_group_normalized_rewards(
+  raw_rewards: torch.Tensor, # shape (batch_size,)
+  group_size: int,
+  baseline: Literal["mean", "none"] = "mean",
+  advantage_eps: float = 1e-8,
+  advantage_normalizer: Literal["std", "none", "mean"] = "std",
+) -> GroupRewards:
+  rewards = raw_rewards.view(-1, group_size)
+  baseline_value = torch.zeros(rewards.size(0))
+  if baseline == "mean":
+    baseline_value = rewards.mean(dim=1)
+  advantage_norm = torch.ones_like(baseline_value)
+  if advantage_normalizer == "std":
+    advantage_norm = rewards.std(dim=1) + advantage_eps
+  elif advantage_normalizer == "mean":
+    advantage_norm = rewards.mean(dim=1) + advantage_eps
+  advantages = (rewards - baseline_value[:, None]) / advantage_norm[:, None]
+  return GroupRewards(advantages=advantages.view(-1), metadata={
+    "baseline_value": baseline_value.mean().item(),
+    "advantage_norm": advantage_norm.mean().item(),
+  })
