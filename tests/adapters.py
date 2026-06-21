@@ -330,7 +330,28 @@ def run_grpo_train_step(
                 Dict with metadata from the underlying loss call, gradient norm
                 before clipping, and any other statistics you might want to log.
     """
-    raise NotImplementedError
+    from cs336_alignment.rl.grpo import grpo_train_step
+    result = grpo_train_step(
+        model,
+        tokenizer,
+        optimizer,
+        reward_fn,
+        repeated_prompts,
+        rollout_responses,
+        repeated_ground_truths,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        max_grad_norm=max_grad_norm,
+        group_size=group_size,
+        baseline=baseline,
+        advantage_eps=advantage_eps,
+        advantage_normalizer=advantage_normalizer,
+        importance_reweighting_method=importance_reweighting_method,
+        old_log_probs=old_log_probs,
+        cliprange=cliprange,
+        loss_normalization=loss_normalization,
+        normalization_constant=normalization_constant,
+    )
+    return (result.loss, result.metadata())
 
 
 """

@@ -57,21 +57,20 @@ def get_response_log_probs(
   labels: torch.Tensor, # shape (batch_size, seq_length)
   return_token_entropy: bool = False,
 ) -> ResponseLogProbs:
-  with torch.no_grad():
-    outputs = model(input_ids=input_ids, labels=labels)
-    output_logits = outputs.logits
-    # print(output_logits.shape, labels.shape)
-    log_probs = -torch.nn.functional.cross_entropy(
-      output_logits.view(-1, output_logits.size(-1)),
-      labels.view(-1),
-      reduction="none"
-    ).view(labels.size())
-    # print(log_probs.shape)
-    token_entropy = None
-    if return_token_entropy:
-      probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
-      token_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
-    return ResponseLogProbs(log_probs=log_probs, token_entropy=token_entropy)
+  outputs = model(input_ids=input_ids, labels=labels)
+  output_logits: torch.Tensor = outputs.logits
+  # print(output_logits.shape, labels.shape)
+  log_probs = -torch.nn.functional.cross_entropy(
+    output_logits.view(-1, output_logits.size(-1)),
+    labels.reshape(-1),
+    reduction="none"
+  ).view(labels.size())
+  # print(log_probs.shape)
+  token_entropy = None
+  if return_token_entropy:
+    probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+    token_entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
+  return ResponseLogProbs(log_probs=log_probs, token_entropy=token_entropy)
 
 
 @dataclass
