@@ -46,7 +46,7 @@ def run_tokenize_prompt_and_output(
                 with labels, with value 1 where the corresponding label token
                 is part of the response and 0 otherwise.
     """
-    from cs336_alignment.inference.data import tokenize_prompt_and_output
+    from cs336_alignment.rl.utils import tokenize_prompt_and_output
     return tokenize_prompt_and_output(prompt_strs, output_strs, tokenizer).__dict__
 
 
@@ -83,7 +83,7 @@ def run_get_response_log_probs(
                 entropy for each position (present only if
                 return_token_entropy=True).
     """
-    from cs336_alignment.inference.data import get_response_log_probs
+    from cs336_alignment.rl.utils import get_response_log_probs
     return get_response_log_probs(model, input_ids, labels, return_token_entropy).__dict__
 
 
@@ -116,7 +116,7 @@ def run_compute_rollout_rewards(
                 Reward statistics to log. At minimum, include the mean total
                 and format rewards over the rollout batch.
     """
-    from cs336_alignment.inference.data import compute_rollout_rewards
+    from cs336_alignment.rl.utils import compute_rollout_rewards
     result = compute_rollout_rewards(reward_fn, rollout_responses, repeated_ground_truths)
     return (result.raw_rewards, result.metadata or {})
 
@@ -157,7 +157,7 @@ def run_compute_group_normalized_rewards(
                 your choice of other statistics to log (e.g. mean, std, max/min
                 of rewards).
     """
-    from cs336_alignment.inference.data import compute_group_normalized_rewards
+    from cs336_alignment.rl.utils import compute_group_normalized_rewards
     result = compute_group_normalized_rewards(raw_rewards, group_size, baseline, advantage_eps, advantage_normalizer)
     return (result.advantages, result.metadata or {})
 
@@ -206,7 +206,7 @@ def run_compute_policy_gradient_loss(
                 Statistics from the underlying loss call, such as
                 clip-fraction components.
     """
-    from cs336_alignment.inference.data import compute_policy_gradient_loss
+    from cs336_alignment.rl.utils import compute_policy_gradient_loss
     result = compute_policy_gradient_loss(raw_rewards_or_advantages, policy_log_probs, importance_reweighting_method, old_log_probs, cliprange, response_mask)
     return (result.per_token_policy_gradient_loss, result.metadata or {})
 
@@ -240,7 +240,7 @@ def run_aggregate_loss_across_microbatch(
             A scalar containing the average loss. Make sure you can later call
             backward on this loss.
     """
-    from cs336_alignment.inference.data import aggregate_loss_across_microbatch
+    from cs336_alignment.rl.utils import aggregate_loss_across_microbatch
     return aggregate_loss_across_microbatch(per_token_policy_gradient_loss, mask, loss_normalization, normalization_constant)
 
 
