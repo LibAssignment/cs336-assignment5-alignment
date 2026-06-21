@@ -14,32 +14,69 @@ with open(WORKSPACE_DIR / "data/gsm8k/test.jsonl") as f:
 prompt_q, VLLM_BASE_URL
 
 # %%
+from dataclasses import dataclass
+from typing import Callable
+from cs336_alignment.drgrpo_grader import extract_answer, question_only_reward_fn, r1_zero_reward_fn
+@dataclass
+class Prompt:
+  name: str
+  prompt: str
+  extract: Callable[[str], str]
+  grade: Callable[[str, str], dict[str, float]]
+
+prompt_kinds = ["question_only", "r1_zero", "r1_zero_three_shot_gsm8k"]
+prompt_strs = dict[str, str]()
+for i in prompt_kinds:
+  with open(WORKSPACE_DIR / f"cs336_alignment/prompts/{i}.prompt") as f:
+    prompt_strs[i] = f.read()
+prompts = [
+  Prompt(name="question_only", prompt=prompt_strs["question_only"], extract=extract_answer, grade=question_only_reward_fn),
+  Prompt(name="r1_zero", prompt=prompt_strs["r1_zero"], extract=extract_answer, grade=r1_zero_reward_fn),
+  Prompt(name="r1_zero_three_shot_gsm8k", prompt=prompt_strs["r1_zero_three_shot_gsm8k"], extract=extract_answer, grade=r1_zero_reward_fn),
+]
+
+# %%
 from cs336_alignment.vllm_utils import VLLMServer
 model_id = os.path.expanduser("~/.cache/huggingface/hub/models--allenai--OLMo-2-0425-1B/snapshots/a1847dff35000b4271fa70afc5db10fd29fedbdf")
 server = VLLMServer(model_id, gpu=0)
 server.start()
 
 # %%
-from cs336_alignment.vllm_utils import generate_completions
+from cs336_alignment.vllm_utils import generate_completions, VLLMCompletion
 # VLLM_BASE_URL = "http://10.0.0.132:8008"
-prompts = [prompt_q.format(question=example["question"]) for example in data_gsm8k_test]
-completions = generate_completions(
-  VLLM_BASE_URL,
-  "",
-  prompts,
-  {"temperature": 0.7, "max_tokens": 1000, "n": 1, "seed": 42},
-  5,
-)
-completions
+@dataclass
+class CompletionResult:
+  completion: VLLMCompletion
+  reward: dict[str, float]
+
+def run(prompt: Prompt, data: list[dict]):
+  prompts = [prompt.prompt.format(question=example["question"]) for example in data]
+  completions = generate_completions(
+    VLLM_BASE_URL,
+    "",
+    prompts,
+    {"temperature": 0.7, "max_tokens": 1000, "n": 1, "seed": 42},
+    5,
+  )
+  rewards = list[CompletionResult]()
+  for (i, d) in zip(completions, data):
+    # answer = prompt.extract(i.text)
+    reward = prompt.grade(i.text, d["answer"])
+    rewards.append(CompletionResult(completion=i, reward=reward))
+  return rewards
 
 # %%
 import json
 import os
 os.makedirs(WORKSPACE_DIR / "out", exist_ok=True)
-with open(WORKSPACE_DIR / "out/baseline_completions_questions_only_test.json", "w") as f:
-  for i in completions:
-    f.write(json.dumps(i.__dict__) + "\n")
-
+results = dict[str, list[CompletionResult]]()
+for k in prompt_kinds:
+  p = next(p for p in prompts if p.name == k)
+  rewards = run(p, data_gsm8k_test)
+  results[k] = rewards
+  with open(WORKSPACE_DIR / f"out/baseline_completions_{k}_test.jsonl", "w") as f:
+    for r in rewards:
+      f.write(json.dumps({"completion": r.completion.__dict__, "reward": r.reward}) + "\n")
 
 # %%
 """
@@ -52,18 +89,24 @@ until max lenght is reached.
 # generate_completions(VLLM_BASE_URL, "qwen3.6", "What is the capital of France?", {"temperature": 0.7, "max_tokens": 50, "n": 1, "seed": 42})
 
 # %%
-from cs336_alignment.drgrpo_grader import question_only_reward_fn
-total_reward = {
-  "answer_reward": .0,
-  "format_reward": .0,
-  "reward": .0,
-}
-for (i, d) in zip(completions, data_gsm8k_test):
-  reward = question_only_reward_fn(i.text, d["answer"])
-  total_reward["reward"] += reward["reward"]
-  total_reward["answer_reward"] += reward["answer_reward"]
-  total_reward["format_reward"] += reward["format_reward"]
-total_reward
+results = dict[str, list[CompletionResult]]()
+for k in prompt_kinds:
+  with open(WORKSPACE_DIR / f"out/baseline_completions_{k}_test.jsonl") as f:
+    rewards = [CompletionResult(completion=VLLMCompletion(**json.loads(line)["completion"]), reward=json.loads(line)["reward"]) for line in f.readlines()]
+    results[k] = rewards
 
+# %%
+for k in prompt_kinds:
+  total_reward = {
+    "answer_reward": .0,
+    "format_reward": .0,
+    "reward": .0,
+  }
+  for (i, d) in zip(results[k], data_gsm8k_test):
+    reward = i.reward
+    total_reward["reward"] += reward["reward"]
+    total_reward["answer_reward"] += reward["answer_reward"]
+    total_reward["format_reward"] += reward["format_reward"]
+  print(f"Total reward for {k}: {total_reward}")
 
 # %%
