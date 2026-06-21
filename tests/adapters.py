@@ -206,7 +206,9 @@ def run_compute_policy_gradient_loss(
                 Statistics from the underlying loss call, such as
                 clip-fraction components.
     """
-    raise NotImplementedError
+    from cs336_alignment.inference.data import compute_policy_gradient_loss
+    result = compute_policy_gradient_loss(raw_rewards_or_advantages, policy_log_probs, importance_reweighting_method, old_log_probs, cliprange, response_mask)
+    return (result.per_token_policy_gradient_loss, result.metadata or {})
 
 
 def run_aggregate_loss_across_microbatch(
@@ -238,7 +240,8 @@ def run_aggregate_loss_across_microbatch(
             A scalar containing the average loss. Make sure you can later call
             backward on this loss.
     """
-    raise NotImplementedError
+    from cs336_alignment.inference.data import aggregate_loss_across_microbatch
+    return aggregate_loss_across_microbatch(per_token_policy_gradient_loss, mask, loss_normalization, normalization_constant)
 
 
 def run_grpo_train_step(

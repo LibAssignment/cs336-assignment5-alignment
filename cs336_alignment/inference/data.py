@@ -119,3 +119,45 @@ def compute_group_normalized_rewards(
     "baseline_value": baseline_value.mean().item(),
     "advantage_norm": advantage_norm.mean().item(),
   })
+
+
+@dataclass
+class ComputePolicyGradientLossResult:
+  per_token_policy_gradient_loss: torch.Tensor # shape (batch_size, seq_length)
+  metadata: dict[str, torch.Tensor] | None = None
+
+def compute_policy_gradient_loss(
+  advantages: torch.Tensor, # shape (batch_size,)
+  log_probs: torch.Tensor, # shape (batch_size, seq_length)
+  importance_reweighting_method: Literal["none", "noclip", "grpo", "gspo"] = "none",
+  old_log_probs: torch.Tensor | None = None,
+  cliprange: float | None = None,
+  response_mask: torch.Tensor | None = None,
+) -> ComputePolicyGradientLossResult:
+  if importance_reweighting_method != "none":
+    raise NotImplementedError("Importance reweighting methods other than 'none' are not implemented yet.")
+  advantages = advantages.view(-1, 1)
+  per_token_policy_gradient_loss = -log_probs * advantages
+  if response_mask is not None:
+    per_token_policy_gradient_loss = per_token_policy_gradient_loss * response_mask
+  return ComputePolicyGradientLossResult(per_token_policy_gradient_loss=per_token_policy_gradient_loss, metadata=None)
+
+
+def aggregate_loss_across_microbatch(
+  per_token_policy_gradient_loss: torch.Tensor,
+  mask: torch.Tensor,
+  loss_normalization: Literal["sequence", "constant"] = "sequence",
+  normalization_constant: int | None = None,
+) -> torch.Tensor:
+  loss = (per_token_policy_gradient_loss * mask).sum(dim=1)
+  print(loss, mask, loss_normalization, normalization_constant)
+  if loss_normalization == "sequence":
+    loss = loss / mask.sum(dim=1).clamp(min=1)
+    return loss.mean()
+  elif loss_normalization == "constant":
+    if normalization_constant is None:
+      raise ValueError("normalization_constant must be provided when loss_normalization is 'constant'.")
+    loss = loss / normalization_constant
+    return loss.sum() # TODO: why sum here?
+  else:
+    raise NotImplementedError(f"Unknown loss_normalization: {loss_normalization}")
