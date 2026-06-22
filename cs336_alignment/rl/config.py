@@ -44,6 +44,7 @@ class TrainConfig:
   prompt: str = "question_only"
   inference: str | None = None
   vllm_model: str = ""
+  vllm_device: str = "cuda:0"
   inference_batch_size: int = 5
   sampling_temperature: float = 1.0
   sampling_max_tokens: int = 512
@@ -188,6 +189,7 @@ def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
   parser.add_argument("--prompt", choices=PROMPT_KINDS, default=argparse.SUPPRESS)
   parser.add_argument("--inference", type=inference_base_url, default=argparse.SUPPRESS)
   parser.add_argument("--vllm-model", default=argparse.SUPPRESS)
+  parser.add_argument("--vllm-device", default=argparse.SUPPRESS)
   parser.add_argument("--inference-batch-size", type=int, default=argparse.SUPPRESS)
   parser.add_argument("--sampling-temperature", type=float, default=argparse.SUPPRESS)
   parser.add_argument("--temperature", type=float, dest="sampling_temperature", default=argparse.SUPPRESS)

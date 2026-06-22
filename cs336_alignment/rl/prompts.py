@@ -4,6 +4,7 @@ import re
 from typing import Callable
 
 from cs336_alignment.drgrpo_grader import extract_answer, question_only_reward_fn, r1_zero_reward_fn
+from ..vllm_utils import VLLMServer
 
 
 RewardFn = Callable[[str, str], dict[str, float]]
@@ -116,7 +117,7 @@ def make_smoke_rollouts(
 
 
 def make_vllm_rollouts(
-  base_url: str,
+  base_url: str | VLLMServer,
   model_id: str,
   prompt: Prompt,
   examples: list[dict[str, str]],
@@ -129,18 +130,26 @@ def make_vllm_rollouts(
   from cs336_alignment.vllm_utils import generate_completions
 
   prompt_strs = [prompt.format(question=example["question"]) for example in examples]
-  completions = generate_completions(
-    base_url,
-    model_id,
-    prompt_strs,
-    {
-      "temperature": temperature,
-      "max_tokens": max_tokens,
-      "n": group_size,
-      "seed": seed,
-    },
-    batch_size,
-  )
+  sampling_params = {
+    "temperature": temperature,
+    "max_tokens": max_tokens,
+    "n": group_size,
+    "seed": seed,
+  }
+  if isinstance(base_url, VLLMServer):
+    completions = base_url.generate_completions(
+      prompt_strs,
+      sampling_params,
+      batch_size,
+    )
+  else:
+    completions = generate_completions(
+      base_url,
+      model_id,
+      prompt_strs,
+      sampling_params,
+      batch_size,
+    )
   if len(completions) != len(examples) * group_size:
     raise RuntimeError(f"Expected {len(examples) * group_size} completions, got {len(completions)}")
 

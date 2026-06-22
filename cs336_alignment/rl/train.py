@@ -133,23 +133,14 @@ class TrainState:
       clear_pid(self.job)
       write_status(self.job, "failed", exit_code=1)
 
-  def metrics(self, values: dict[str, float | int], step: int, log_prob_shape: tuple[int, ...] | None = None) -> None:
+  def step_metrics(self, values: dict[str, float | int], step: int) -> None:
     if self.wandb_run is not None:
       self.wandb_run.log(values, step=step)
-    if log_prob_shape is None:
-      return
-    logger.info(
-      "step=%d loss=%.6f reward_mean=%.3f reward_min=%.3f reward_max=%.3f "
-      "advantage_mean=%.3f advantage_std=%.3f log_prob_shape=%s",
-      step,
-      values["train/loss"],
-      values["reward/mean"],
-      values["reward/min"],
-      values["reward/max"],
-      values["advantage/mean"],
-      values["advantage/std"],
-      log_prob_shape,
-    )
+    message = f"step={step}"
+    for key, value in values.items():
+      key = key.replace("/", "_")
+      message += f" {key}={value:.6f}" if isinstance(value, float) else f" {key}={value}"
+    logger.info(message)
 
   def model_metrics(self, num_params: int, rollout_prompt_count: int, context_length: int | None) -> None:
     if self.wandb_run is None:
@@ -265,6 +256,16 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
   state.model_metrics(num_params, rollout_prompt_count, context_length)
   logger.info("Running GRPO train steps")
 
+  if config.inference == "vllm":
+    logger.info("Initializing weight sync with vLLM inference engine at %s", config.inference)
+    from ..vllm_utils import VLLMServer, init_weight_sync
+    model_id = config.model_path() or config.vllm_model
+    vllm = VLLMServer(str(model_id), config.vllm_model)
+
+    init_weight_sync(config.inference, config.device)
+  else:
+    vllm = None
+
   for step in state.progress(range(start_step, config.num_rollout_steps), desc="training", unit="step"):
     logger.debug("Starting step %d", step)
     start = (step * rollout_prompt_count) % len(examples)
@@ -275,7 +276,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
     else:
       logger.info("Generating rollouts from inference endpoint: %s", config.inference)
       prompts, outputs, ground_truths = make_vllm_rollouts(
-        config.inference,
+        vllm or config.inference,
         config.vllm_model,
         prompt,
         batch_examples,
@@ -318,7 +319,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       "rollout/prompt_count": len(batch_examples),
       "rollout/log_prob_seq_len": result.log_probs.shape[1],
     }
-    state.metrics(metrics, step=step, log_prob_shape=tuple(result.log_probs.shape))
+    state.step_metrics(metrics, step=step)
     state.save_checkpoint(step + 1, model, optimizer)
 
   state.finish()
