@@ -33,7 +33,7 @@ def tokenize_prompt_and_output(
   output_lengths = output_result.attention_mask.sum(dim=1)
 
   max_length = (prompt_lengths + output_lengths).max()
-  tokenized_ids = torch.full((len(prompt_strs), max_length), tokenizer.pad_token_id)
+  tokenized_ids = torch.full((len(prompt_strs), max_length), tokenizer.pad_token_id)  # type: ignore
   mask = torch.zeros_like(tokenized_ids, dtype=torch.bool)
   for i in range(len(prompt_strs)):
     tokenized_ids[i, :prompt_lengths[i]] = prompt_ids[i, :prompt_lengths[i]]

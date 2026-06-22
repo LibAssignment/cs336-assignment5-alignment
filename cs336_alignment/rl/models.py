@@ -2,6 +2,10 @@ import torch
 
 from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizer
 
+from ..checkpoint import get_model_and_tokenizer
+
+from .config import TrainConfig
+
 
 class TinyByteTokenizer(PreTrainedTokenizer):
   model_input_names = ["input_ids", "attention_mask"]
@@ -46,7 +50,7 @@ class TinyByteTokenizer(PreTrainedTokenizer):
   def convert_tokens_to_string(self, tokens: list[str]) -> str:
     byte_values = []
     for token in tokens:
-      if token in {self.eos_token, self.pad_token}:
+      if token in {self.eos_token, self.pad_token}:  # type: ignore
         continue
       byte_values.append(ord(token))
     return bytes(byte_values).decode("utf-8", errors="replace")
@@ -88,7 +92,7 @@ def tiny_train_model(tokenizer, n_positions: int = 1024, device=None):
   )
   model = GPT2LMHeadModel(config)
   model.train()
-  return model.to(device or available_device())
+  return model.to(device or available_device())  # type: ignore
 
 def available_device():
   if torch.cuda.is_available():
@@ -98,3 +102,28 @@ def available_device():
   else:
     device = torch.device("cpu")
   return device
+
+
+def build_model_and_tokenizer(config: TrainConfig, device: torch.device):
+  if config.model == "tiny":
+    tokenizer = tiny_byte_tokenizer()
+    model = tiny_train_model(tokenizer, device=device)
+    return model, tokenizer
+  if config.model == "olmo2-1B":
+    model_path = config.model_path()
+    if model_path is None:
+      raise ValueError("model_path is required for olmo2-1B")
+    model, tokenizer = get_model_and_tokenizer(str(model_path), str(device))
+    if tokenizer.pad_token_id is None:
+      tokenizer.pad_token = tokenizer.eos_token
+    model.train()
+    return model, tokenizer
+  raise ValueError(f"Unknown model: {config.model}")
+
+
+def model_context_length(model) -> int | None:
+  for attr in ("n_positions", "max_position_embeddings", "seq_length"):
+    value = getattr(model.config, attr, None)
+    if value is not None:
+      return value
+  return None
