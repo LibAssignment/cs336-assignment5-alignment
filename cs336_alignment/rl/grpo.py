@@ -43,6 +43,7 @@ def grpo_train_step(
   loss_normalization: Literal["sequence", "constant"] = "sequence",
   normalization_constant: int | None = None,
 ):
+  device = model.device
   tokenized = tokenize_prompt_and_output(
     prompt_strs,
     output_strs,
@@ -65,14 +66,14 @@ def grpo_train_step(
 
   macrobatch_size = (len(prompt_strs) - 1) // gradient_accumulation_steps + 1
 
-  final_loss = torch.tensor(0.0, device=x.device)
+  final_loss = torch.tensor(0.0, device=device)
   final_log_probs = []
   for i in range(0, len(prompt_strs), macrobatch_size):
-    x_batch = x[i:i+macrobatch_size]
-    y_batch = y[i:i+macrobatch_size]
-    mask_batch = tokenized.response_mask[i:i+macrobatch_size]
-    adv_batch = advantages.advantages[i:i+macrobatch_size]
-    old_log_probs_batch = old_log_probs[i:i+macrobatch_size] if old_log_probs is not None else None
+    x_batch = x[i:i+macrobatch_size].to(device)
+    y_batch = y[i:i+macrobatch_size].to(device)
+    mask_batch = tokenized.response_mask[i:i+macrobatch_size].to(device)
+    adv_batch = advantages.advantages[i:i+macrobatch_size].to(device)
+    old_log_probs_batch = old_log_probs[i:i+macrobatch_size].to(device) if old_log_probs is not None else None
     log_probs = get_response_log_probs(model, x_batch, y_batch, mask=mask_batch, return_token_entropy=True)
     loss_batch = compute_policy_gradient_loss(
       adv_batch,
@@ -90,7 +91,7 @@ def grpo_train_step(
     )
     loss.backward()
 
-    final_loss += loss.item() * x_batch.size(0) / len(prompt_strs)
+    final_loss += loss * (x_batch.size(0) / len(prompt_strs))
     final_log_probs.append(log_probs.log_probs.detach())
   if max_grad_norm is not None:
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
