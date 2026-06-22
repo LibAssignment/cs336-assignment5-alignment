@@ -136,6 +136,7 @@ def find_job_dir(job_root: Path, run_id: int) -> Path | None:
 
 def prepare_job(job_config: JobConfig, train_config: TrainConfig, wandb_config: WandbConfig | None) -> Job:
   job_root = job_config.job_root
+  resuming_existing_job = False
   if job_config.run_id is None:
     run_id, job_path = allocate_job_dir(job_root)
   else:
@@ -144,6 +145,7 @@ def prepare_job(job_config: JobConfig, train_config: TrainConfig, wandb_config: 
     if job_config.resume:
       if job_path is None:
         raise FileNotFoundError(f"Cannot resume missing job {run_id} under {job_root}")
+      resuming_existing_job = True
     else:
       if job_path is not None:
         status = read_json(job_path / "job.json").get("status")
@@ -158,6 +160,11 @@ def prepare_job(job_config: JobConfig, train_config: TrainConfig, wandb_config: 
   job.checkpoints_dir.mkdir(parents=True, exist_ok=True)
   train_config.save_json(job.path / "train_config.json")
   if wandb_config is not None:
+    if resuming_existing_job and wandb_config.run_name is None:
+      saved_wandb_config = read_json(job.path / "wandb_config.json")
+      saved_run_name = saved_wandb_config.get("run_name")
+      if isinstance(saved_run_name, str) and saved_run_name:
+        wandb_config.run_name = saved_run_name
     write_json(job.path / "wandb_config.json", wandb_config.to_dict())
   write_json(job.path / "job_config.json", job_config.to_dict() | {"run_id": run_id})
   write_status(job, "created")

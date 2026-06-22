@@ -14,7 +14,7 @@ import torch
 from .models import build_model_and_tokenizer, model_context_length
 from .grpo import grpo_train_step
 from .config import JobConfig, TrainConfig, WandbConfig
-from .jobs import Job, checkpoint_dir, clear_pid, latest_checkpoint, prepare_job, write_latest, write_pid, write_status
+from .jobs import Job, checkpoint_dir, clear_pid, latest_checkpoint, prepare_job, write_json, write_latest, write_pid, write_status
 from .prompts import (
   extract_gsm8k_answer,
   get_prompt,
@@ -58,23 +58,149 @@ def progress(iterable: Iterable[T], **kwargs) -> Iterable[T]:
   return tqdm(iterable, **kwargs)
 
 
-def init_wandb(train_config: TrainConfig, wandb_config: WandbConfig):
-  if not wandb_config.enabled:
-    return None
-  if wandb_config.api_key is not None:
-    os.environ.setdefault("WANDB_API_KEY", wandb_config.api_key)
-  try:
-    import wandb
-  except ImportError as error:
-    raise RuntimeError("wandb is not installed. Install the plots or gpu extra, or omit --wandb-project.") from error
+class TrainState:
+  def __init__(
+    self,
+    config: TrainConfig,
+    wandb_config: WandbConfig | None = None,
+    job_config: JobConfig | None = None,
+  ) -> None:
+    self.config = config
+    self.wandb_config = wandb_config
+    self.job_config = job_config
+    self.job = prepare_job(job_config, config, wandb_config) if job_config is not None else None
+    self.wandb_run = None
+    self.completed = False
 
-  return wandb.init(
-    project=wandb_config.project,
-    entity=wandb_config.entity,
-    name=wandb_config.run_name,
-    mode=wandb_config.mode,  # type: ignore
-    config=train_config.to_dict(),
-  )
+  def init(self) -> None:
+    self.configure_logging()
+    if self.job is not None:
+      write_pid(self.job)
+      write_status(self.job, "running", pid=os.getpid())
+      logger.info("Job %d output: %s", self.job.run_id, self.job.path)
+      atexit.register(self.mark_failed_on_exit)
+
+    logger.info("Starting local GRPO smoke test")
+    logger.info("Config: %s", self.config.to_json())
+    self.wandb_run = self.init_wandb()
+    self.save_wandb_run_name()
+
+  def configure_logging(self) -> None:
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(getattr(logging, self.config.log_level))
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    if not suppress_console_output():
+      stream_handler = logging.StreamHandler()
+      stream_handler.setLevel(getattr(logging, self.config.log_level))
+      stream_handler.setFormatter(formatter)
+      root.addHandler(stream_handler)
+    if self.job is not None:
+      file_handler = logging.FileHandler(self.job.log_path)
+      file_handler.setLevel(getattr(logging, self.config.log_level))
+      file_handler.setFormatter(formatter)
+      root.addHandler(file_handler)
+
+  def init_wandb(self):
+    if self.wandb_config is None or not self.wandb_config.enabled:
+      return None
+    if self.wandb_config.api_key is not None:
+      os.environ.setdefault("WANDB_API_KEY", self.wandb_config.api_key)
+    try:
+      import wandb
+    except ImportError as error:
+      raise RuntimeError("wandb is not installed. Install the plots or gpu extra, or omit --wandb-project.") from error
+
+    return wandb.init(
+      project=self.wandb_config.project,
+      entity=self.wandb_config.entity,
+      name=self.wandb_config.run_name,
+      mode=self.wandb_config.mode,  # type: ignore
+      config=self.config.to_dict(),
+    )
+
+  def save_wandb_run_name(self) -> None:
+    if self.job is None or self.wandb_config is None or self.wandb_run is None:
+      return
+    run_name = getattr(self.wandb_run, "name", None)
+    if not isinstance(run_name, str) or not run_name:
+      return
+    self.wandb_config.run_name = run_name
+    write_json(self.job.path / "wandb_config.json", self.wandb_config.to_dict())
+
+  def mark_failed_on_exit(self) -> None:
+    if self.job is not None and not self.completed:
+      clear_pid(self.job)
+      write_status(self.job, "failed", exit_code=1)
+
+  def metrics(self, values: dict[str, float | int], step: int, log_prob_shape: tuple[int, ...] | None = None) -> None:
+    if self.wandb_run is not None:
+      self.wandb_run.log(values, step=step)
+    if log_prob_shape is None:
+      return
+    logger.info(
+      "step=%d loss=%.6f reward_mean=%.3f reward_min=%.3f reward_max=%.3f "
+      "advantage_mean=%.3f advantage_std=%.3f log_prob_shape=%s",
+      step,
+      values["train/loss"],
+      values["reward/mean"],
+      values["reward/min"],
+      values["reward/max"],
+      values["advantage/mean"],
+      values["advantage/std"],
+      log_prob_shape,
+    )
+
+  def model_metrics(self, num_params: int, rollout_prompt_count: int, context_length: int | None) -> None:
+    if self.wandb_run is None:
+      return
+    values = {
+      "model/num_params": num_params,
+      "rollout/rollout_prompt_count": rollout_prompt_count,
+    }
+    if context_length is not None:
+      values["model/context_length"] = context_length
+    self.wandb_run.log(values, step=0)
+
+  def save_checkpoint(self, step: int, model, optimizer) -> Path | None:
+    if self.job is None or self.job_config is None or self.job_config.checkpoint_every <= 0:
+      return None
+    if step % self.job_config.checkpoint_every != 0 and step != self.config.num_rollout_steps:
+      return None
+    path = checkpoint_dir(self.job, step)
+    path.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), path / "model.pt")
+    torch.save(optimizer.state_dict(), path / "optimizer.pt")
+    (path / "trainer_state.json").write_text(json.dumps({"next_step": step}, indent=2, sort_keys=True) + "\n")
+    write_latest(self.job, path)
+    write_status(self.job, "running", checkpoint=str(path.relative_to(self.job.path)), next_step=step)
+    logger.info("Saved checkpoint: %s", path)
+    return path
+
+  def load_resume_checkpoint(self, model, optimizer, device: torch.device) -> int:
+    if self.job is None or self.job_config is None or not self.job_config.resume:
+      return 0
+    checkpoint = latest_checkpoint(self.job)
+    if checkpoint is None:
+      raise FileNotFoundError(f"No latest checkpoint found for job {self.job.run_id} at {self.job.path}")
+    model.load_state_dict(torch.load(checkpoint / "model.pt", map_location=device))
+    optimizer.load_state_dict(torch.load(checkpoint / "optimizer.pt", map_location=device))
+    trainer_state = json.loads((checkpoint / "trainer_state.json").read_text())
+    next_step = int(trainer_state["next_step"])
+    logger.info("Loaded checkpoint: %s next_step=%d", checkpoint, next_step)
+    return next_step
+
+  def progress(self, iterable: Iterable[T], **kwargs) -> Iterable[T]:
+    return progress(iterable, **kwargs)
+
+  def finish(self) -> None:
+    if self.wandb_run is not None:
+      self.wandb_run.finish()
+    if self.job is not None:
+      self.completed = True
+      clear_pid(self.job)
+      write_status(self.job, "succeeded", exit_code=0)
+    logger.info("Done")
 
 
 def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
@@ -97,65 +223,11 @@ def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
   return examples
 
 
-def configure_logging(config: TrainConfig, job: Job | None) -> None:
-  root = logging.getLogger()
-  root.handlers.clear()
-  root.setLevel(getattr(logging, config.log_level))
-  formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
-  if not suppress_console_output():
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(getattr(logging, config.log_level))
-    stream_handler.setFormatter(formatter)
-    root.addHandler(stream_handler)
-  if job is not None:
-    file_handler = logging.FileHandler(job.log_path)
-    file_handler.setLevel(getattr(logging, config.log_level))
-    file_handler.setFormatter(formatter)
-    root.addHandler(file_handler)
-
-
-def save_checkpoint(job: Job, step: int, model, optimizer) -> Path:
-  path = checkpoint_dir(job, step)
-  path.mkdir(parents=True, exist_ok=True)
-  torch.save(model.state_dict(), path / "model.pt")
-  torch.save(optimizer.state_dict(), path / "optimizer.pt")
-  (path / "trainer_state.json").write_text(json.dumps({"next_step": step}, indent=2, sort_keys=True) + "\n")
-  write_latest(job, path)
-  write_status(job, "running", checkpoint=str(path.relative_to(job.path)), next_step=step)
-  logger.info("Saved checkpoint: %s", path)
-  return path
-
-
-def load_checkpoint(path: Path, model, optimizer, device: torch.device) -> int:
-  model.load_state_dict(torch.load(path / "model.pt", map_location=device))
-  optimizer.load_state_dict(torch.load(path / "optimizer.pt", map_location=device))
-  trainer_state = json.loads((path / "trainer_state.json").read_text())
-  next_step = int(trainer_state["next_step"])
-  logger.info("Loaded checkpoint: %s next_step=%d", path, next_step)
-  return next_step
-
-
 def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_config: JobConfig | None = None) -> None:
-  job = prepare_job(job_config, config, wandb_config) if job_config is not None else None
-  configure_logging(config, job)
-  job_completed = {"value": False}
-  if job is not None:
-    write_pid(job)
-    write_status(job, "running", pid=os.getpid())
-    logger.info("Job %d output: %s", job.run_id, job.path)
-
-    def mark_failed_on_exit() -> None:
-      if not job_completed["value"]:
-        clear_pid(job)
-        write_status(job, "failed", exit_code=1)
-
-    atexit.register(mark_failed_on_exit)
-
+  state = TrainState(config, wandb_config, job_config)
+  state.init()
   torch.manual_seed(0)
   device = torch.device(config.device)
-  logger.info("Starting local GRPO smoke test")
-  logger.info("Config: %s", config.to_json())
-  wandb_run = init_wandb(config, wandb_config) if wandb_config is not None else None
 
   examples = load_gsm8k_examples(config.data_path, config.n_train_examples)
   rollout_prompt_count = config.num_rollout_prompts()
@@ -189,23 +261,11 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
   context_length = model_context_length(model)
   logger.info("Model ready on %s with %d parameters and context length %s", device, num_params, context_length or "unknown")
   logger.info("Optimizer ready: %s params=%s", optimizer.__class__.__name__, optimizer_kwargs)
-  start_step = 0
-  if job is not None and job_config is not None and job_config.resume:
-    checkpoint = latest_checkpoint(job)
-    if checkpoint is None:
-      raise FileNotFoundError(f"No latest checkpoint found for job {job.run_id} at {job.path}")
-    start_step = load_checkpoint(checkpoint, model, optimizer, device)
-  if wandb_run is not None:
-    model_metrics = {
-      "model/num_params": num_params,
-      "rollout/rollout_prompt_count": rollout_prompt_count,
-    }
-    if context_length is not None:
-      model_metrics["model/context_length"] = context_length
-    wandb_run.log(model_metrics, step=0)
+  start_step = state.load_resume_checkpoint(model, optimizer, device)
+  state.model_metrics(num_params, rollout_prompt_count, context_length)
   logger.info("Running GRPO train steps")
 
-  for step in progress(range(start_step, config.num_rollout_steps), desc="training", unit="step"):
+  for step in state.progress(range(start_step, config.num_rollout_steps), desc="training", unit="step"):
     logger.debug("Starting step %d", step)
     start = (step * rollout_prompt_count) % len(examples)
     batch_examples = [examples[(start + i) % len(examples)] for i in range(rollout_prompt_count)]
@@ -258,34 +318,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       "rollout/prompt_count": len(batch_examples),
       "rollout/log_prob_seq_len": result.log_probs.shape[1],
     }
-    if wandb_run is not None:
-      wandb_run.log(metrics, step=step)
+    state.metrics(metrics, step=step, log_prob_shape=tuple(result.log_probs.shape))
+    state.save_checkpoint(step + 1, model, optimizer)
 
-    message = (
-      "step={step} loss={loss:.6f} reward_mean={reward_mean:.3f} "
-      "reward_min={reward_min:.3f} reward_max={reward_max:.3f} "
-      "advantage_mean={advantage_mean:.3f} advantage_std={advantage_std:.3f} "
-      "log_prob_shape={log_prob_shape}".format(
-        step=step,
-        loss=metrics["train/loss"],
-        reward_mean=metrics["reward/mean"],
-        reward_min=metrics["reward/min"],
-        reward_max=metrics["reward/max"],
-        advantage_mean=metrics["advantage/mean"],
-        advantage_std=metrics["advantage/std"],
-        log_prob_shape=tuple(result.log_probs.shape),
-      )
-    )
-    logger.info(message)
-    if job is not None and job_config is not None and job_config.checkpoint_every > 0:
-      next_step = step + 1
-      if next_step % job_config.checkpoint_every == 0 or next_step == config.num_rollout_steps:
-        save_checkpoint(job, next_step, model, optimizer)
-
-  if wandb_run is not None:
-    wandb_run.finish()
-  if job is not None:
-    job_completed["value"] = True
-    clear_pid(job)
-    write_status(job, "succeeded", exit_code=0)
-  logger.info("Done")
+  state.finish()
