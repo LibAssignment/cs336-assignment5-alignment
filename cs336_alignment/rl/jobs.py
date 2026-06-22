@@ -32,6 +32,14 @@ class Job:
     return self.path / "train.log"
 
   @property
+  def stdout_path(self) -> Path:
+    return self.path / "stdout.log"
+
+  @property
+  def stderr_path(self) -> Path:
+    return self.path / "stderr.log"
+
+  @property
   def pid_path(self) -> Path:
     return self.path / "pid"
 
@@ -138,9 +146,12 @@ def prepare_job(job_config: JobConfig, train_config: TrainConfig, wandb_config: 
         raise FileNotFoundError(f"Cannot resume missing job {run_id} under {job_root}")
     else:
       if job_path is not None:
-        raise FileExistsError(f"Job {run_id} already exists at {job_path}")
-      job_path = job_root / job_dir_name(run_id)
-      job_path.mkdir(parents=True, exist_ok=False)
+        status = read_json(job_path / "job.json").get("status")
+        if status not in {"created", "queued"}:
+          raise FileExistsError(f"Job {run_id} already exists at {job_path}")
+      else:
+        job_path = job_root / job_dir_name(run_id)
+        job_path.mkdir(parents=True, exist_ok=False)
 
   job = Job(run_id=run_id, path=job_path)
   job.path.mkdir(parents=True, exist_ok=True)

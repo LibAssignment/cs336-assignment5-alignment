@@ -155,6 +155,8 @@ class WandbConfig:
 
 @dataclass
 class JobConfig:
+  enabled: bool = True
+  background: bool = False
   job_root: Path = Path("out/jobs")
   run_id: int | None = None
   resume: bool = False
@@ -162,6 +164,8 @@ class JobConfig:
 
   def to_dict(self) -> dict[str, Any]:
     return {
+      "enabled": self.enabled,
+      "background": self.background,
       "job_root": str(self.job_root),
       "run_id": self.run_id,
       "resume": self.resume,
@@ -223,6 +227,9 @@ def add_wandb_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
 
 
 def add_job_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+  job_mode = parser.add_mutually_exclusive_group()
+  job_mode.add_argument("--no-job", dest="job_enabled", action="store_false", default=True)
+  job_mode.add_argument("--job", dest="job_background", action="store_true", default=False)
   parser.add_argument("--job-root", type=Path, default=Path("out/jobs"))
   parser.add_argument("--run-id", type=int, default=None)
   parser.add_argument("--resume", action="store_true")
@@ -249,6 +256,8 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
       "wandb_mode",
       "wandb_api_key",
       "job_root",
+      "job_enabled",
+      "job_background",
       "run_id",
       "resume",
       "checkpoint_every",
@@ -272,6 +281,8 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
     wandb_config.api_key = args.wandb_api_key
 
   job_config = JobConfig(
+    enabled=args.job_enabled,
+    background=args.job_background,
     job_root=args.job_root,
     run_id=args.run_id,
     resume=args.resume,

@@ -4,6 +4,8 @@ import atexit
 import json
 import logging
 import os
+import stat
+import sys
 from pathlib import Path
 from typing import Iterable, TypeVar
 
@@ -25,7 +27,30 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 
+def is_regular_file(stream) -> bool:
+  try:
+    return stat.S_ISREG(os.fstat(stream.fileno()).st_mode)
+  except (AttributeError, OSError):
+    return False
+
+
+def is_devnull(stream) -> bool:
+  try:
+    stream_stat = os.fstat(stream.fileno())
+    devnull_stat = os.stat(os.devnull)
+  except (AttributeError, OSError):
+    return False
+  return stat.S_ISCHR(stream_stat.st_mode) and stream_stat.st_rdev == devnull_stat.st_rdev
+
+
+def suppress_console_output() -> bool:
+  return is_regular_file(sys.stderr) and is_devnull(sys.stdin)
+
+
+
 def progress(iterable: Iterable[T], **kwargs) -> Iterable[T]:
+  if suppress_console_output():
+    return iterable
   try:
     from tqdm.auto import tqdm
   except ImportError:
@@ -73,17 +98,20 @@ def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
 
 
 def configure_logging(config: TrainConfig, job: Job | None) -> None:
-  logging.basicConfig(
-    level=getattr(logging, config.log_level),
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%H:%M:%S",
-    force=True,
-  )
+  root = logging.getLogger()
+  root.handlers.clear()
+  root.setLevel(getattr(logging, config.log_level))
+  formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+  if not suppress_console_output():
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(getattr(logging, config.log_level))
+    stream_handler.setFormatter(formatter)
+    root.addHandler(stream_handler)
   if job is not None:
     file_handler = logging.FileHandler(job.log_path)
     file_handler.setLevel(getattr(logging, config.log_level))
-    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
-    logging.getLogger().addHandler(file_handler)
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
 
 
 def save_checkpoint(job: Job, step: int, model, optimizer) -> Path:
