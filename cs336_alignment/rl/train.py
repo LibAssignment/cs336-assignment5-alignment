@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -10,7 +11,8 @@ import torch
 
 from .models import build_model_and_tokenizer, model_context_length
 from .grpo import grpo_train_step
-from .config import TrainConfig, WandbConfig
+from .config import JobConfig, TrainConfig, WandbConfig
+from .jobs import Job, checkpoint_dir, clear_pid, latest_checkpoint, prepare_job, write_latest, write_pid, write_status
 from .prompts import (
   extract_gsm8k_answer,
   get_prompt,
@@ -70,12 +72,57 @@ def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
   return examples
 
 
-def train(config: TrainConfig, wandb_config: WandbConfig | None = None) -> None:
+def configure_logging(config: TrainConfig, job: Job | None) -> None:
   logging.basicConfig(
     level=getattr(logging, config.log_level),
     format="%(asctime)s %(levelname)s %(message)s",
     datefmt="%H:%M:%S",
+    force=True,
   )
+  if job is not None:
+    file_handler = logging.FileHandler(job.log_path)
+    file_handler.setLevel(getattr(logging, config.log_level))
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+    logging.getLogger().addHandler(file_handler)
+
+
+def save_checkpoint(job: Job, step: int, model, optimizer) -> Path:
+  path = checkpoint_dir(job, step)
+  path.mkdir(parents=True, exist_ok=True)
+  torch.save(model.state_dict(), path / "model.pt")
+  torch.save(optimizer.state_dict(), path / "optimizer.pt")
+  (path / "trainer_state.json").write_text(json.dumps({"next_step": step}, indent=2, sort_keys=True) + "\n")
+  write_latest(job, path)
+  write_status(job, "running", checkpoint=str(path.relative_to(job.path)), next_step=step)
+  logger.info("Saved checkpoint: %s", path)
+  return path
+
+
+def load_checkpoint(path: Path, model, optimizer, device: torch.device) -> int:
+  model.load_state_dict(torch.load(path / "model.pt", map_location=device))
+  optimizer.load_state_dict(torch.load(path / "optimizer.pt", map_location=device))
+  trainer_state = json.loads((path / "trainer_state.json").read_text())
+  next_step = int(trainer_state["next_step"])
+  logger.info("Loaded checkpoint: %s next_step=%d", path, next_step)
+  return next_step
+
+
+def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_config: JobConfig | None = None) -> None:
+  job = prepare_job(job_config, config, wandb_config) if job_config is not None else None
+  configure_logging(config, job)
+  job_completed = {"value": False}
+  if job is not None:
+    write_pid(job)
+    write_status(job, "running", pid=os.getpid())
+    logger.info("Job %d output: %s", job.run_id, job.path)
+
+    def mark_failed_on_exit() -> None:
+      if not job_completed["value"]:
+        clear_pid(job)
+        write_status(job, "failed", exit_code=1)
+
+    atexit.register(mark_failed_on_exit)
+
   torch.manual_seed(0)
   device = torch.device(config.device)
   logger.info("Starting local GRPO smoke test")
@@ -114,6 +161,12 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None) -> None:
   context_length = model_context_length(model)
   logger.info("Model ready on %s with %d parameters and context length %s", device, num_params, context_length or "unknown")
   logger.info("Optimizer ready: %s params=%s", optimizer.__class__.__name__, optimizer_kwargs)
+  start_step = 0
+  if job is not None and job_config is not None and job_config.resume:
+    checkpoint = latest_checkpoint(job)
+    if checkpoint is None:
+      raise FileNotFoundError(f"No latest checkpoint found for job {job.run_id} at {job.path}")
+    start_step = load_checkpoint(checkpoint, model, optimizer, device)
   if wandb_run is not None:
     model_metrics = {
       "model/num_params": num_params,
@@ -124,7 +177,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None) -> None:
     wandb_run.log(model_metrics, step=0)
   logger.info("Running GRPO train steps")
 
-  for step in progress(range(config.num_rollout_steps), desc="training", unit="step"):
+  for step in progress(range(start_step, config.num_rollout_steps), desc="training", unit="step"):
     logger.debug("Starting step %d", step)
     start = (step * rollout_prompt_count) % len(examples)
     batch_examples = [examples[(start + i) % len(examples)] for i in range(rollout_prompt_count)]
@@ -196,7 +249,15 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None) -> None:
       )
     )
     logger.info(message)
+    if job is not None and job_config is not None and job_config.checkpoint_every > 0:
+      next_step = step + 1
+      if next_step % job_config.checkpoint_every == 0 or next_step == config.num_rollout_steps:
+        save_checkpoint(job, next_step, model, optimizer)
 
   if wandb_run is not None:
     wandb_run.finish()
+  if job is not None:
+    job_completed["value"] = True
+    clear_pid(job)
+    write_status(job, "succeeded", exit_code=0)
   logger.info("Done")

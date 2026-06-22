@@ -153,9 +153,26 @@ class WandbConfig:
     return cls.from_dict(data)
 
 
+@dataclass
+class JobConfig:
+  job_root: Path = Path("out/jobs")
+  run_id: int | None = None
+  resume: bool = False
+  checkpoint_every: int = 1
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+      "job_root": str(self.job_root),
+      "run_id": self.run_id,
+      "resume": self.resume,
+      "checkpoint_every": self.checkpoint_every,
+    }
+
+
 class ParsedConfig(NamedTuple):
   train: TrainConfig
   wandb: WandbConfig
+  job: JobConfig
 
 
 def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -205,10 +222,19 @@ def add_wandb_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
   return parser
 
 
+def add_job_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+  parser.add_argument("--job-root", type=Path, default=Path("out/jobs"))
+  parser.add_argument("--run-id", type=int, default=None)
+  parser.add_argument("--resume", action="store_true")
+  parser.add_argument("--checkpoint-every", type=int, default=1)
+  return parser
+
+
 def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
   parser = argparse.ArgumentParser(description="Local smoke test for grpo_train_step on GSM8K.")
   add_train_config_args(parser)
   add_wandb_config_args(parser)
+  add_job_config_args(parser)
   args = parser.parse_args(argv)
 
   config = TrainConfig.load_json(args.config) if args.config is not None else TrainConfig()
@@ -222,6 +248,10 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
       "wandb_run_name",
       "wandb_mode",
       "wandb_api_key",
+      "job_root",
+      "run_id",
+      "resume",
+      "checkpoint_every",
     }:
       continue
     setattr(config, key, value)
@@ -241,4 +271,11 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
   if args.wandb_api_key is not None:
     wandb_config.api_key = args.wandb_api_key
 
-  return ParsedConfig(train=config, wandb=wandb_config)
+  job_config = JobConfig(
+    job_root=args.job_root,
+    run_id=args.run_id,
+    resume=args.resume,
+    checkpoint_every=args.checkpoint_every,
+  )
+
+  return ParsedConfig(train=config, wandb=wandb_config, job=job_config)
