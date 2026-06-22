@@ -73,7 +73,7 @@ def grpo_train_step(
     mask_batch = tokenized.response_mask[i:i+macrobatch_size]
     adv_batch = advantages.advantages[i:i+macrobatch_size]
     old_log_probs_batch = old_log_probs[i:i+macrobatch_size] if old_log_probs is not None else None
-    log_probs = get_response_log_probs(model, x_batch, y_batch, return_token_entropy=True)
+    log_probs = get_response_log_probs(model, x_batch, y_batch, mask=mask_batch, return_token_entropy=True)
     loss_batch = compute_policy_gradient_loss(
       adv_batch,
       log_probs.log_probs,

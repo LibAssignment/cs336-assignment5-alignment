@@ -55,9 +55,10 @@ def get_response_log_probs(
   model: PreTrainedModel,
   input_ids: torch.Tensor, # shape (batch_size, seq_length)
   labels: torch.Tensor, # shape (batch_size, seq_length)
+  mask: torch.Tensor | None = None, # shape (batch_size, seq_length)
   return_token_entropy: bool = False,
 ) -> ResponseLogProbs:
-  outputs = model(input_ids=input_ids, labels=labels)
+  outputs = model(input_ids=input_ids, attention_mask=mask)
   output_logits: torch.Tensor = outputs.logits
   # print(output_logits.shape, labels.shape)
   log_probs = -torch.nn.functional.cross_entropy(
