@@ -769,9 +769,9 @@ def cmd_download(args: argparse.Namespace) -> None:
     download_results(remote, args.local_out)
 
 
-def remote_jobs_command(remote: RemoteConfig, job_args: tuple[str, ...]) -> str:
+def remote_jobs_command(remote: RemoteConfig, setup: SetupConfig, job_args: tuple[str, ...]) -> str:
   quoted_job_args = " ".join(shlex.quote(arg) for arg in remainder_args(list(job_args)))
-  command = "python3 scripts/jobs.py"
+  command = f"{proxy_env(setup)}{uv_run_prefix(remote, setup)} python scripts/jobs.py"
   if quoted_job_args:
     command = f"{command} {quoted_job_args}"
   return f"cd {remote.quoted_remote_dir} && {command}"
@@ -782,7 +782,7 @@ def cmd_jobs(args: argparse.Namespace) -> None:
   setup = setup_from_args(args)
   with ssh_master(remote):
     setup = ensure_remote_ready(remote, setup)
-    ssh(remote, remote_jobs_command(remote, tuple(args.job_args)))
+    ssh(remote, remote_jobs_command(remote, setup, tuple(args.job_args)))
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -817,14 +817,14 @@ def main() -> None:
   add_setup_args(smoke_parser)
   smoke_parser.add_argument("--smoke-group-size", type=int, default=2)
   smoke_parser.add_argument("--smoke-log-path", default="out/smoke.log")
-  smoke_parser.add_argument("train_args", nargs=argparse.REMAINDER)
+  smoke_parser.set_defaults(train_args=[])
   smoke_parser.set_defaults(func=cmd_smoke)
 
   train_parser = subparsers.add_parser("train")
   add_setup_args(train_parser)
   train_parser.add_argument("--smoke-group-size", type=int, default=2)
   train_parser.add_argument("--smoke-log-path", default="out/smoke.log")
-  train_parser.add_argument("train_args", nargs=argparse.REMAINDER)
+  train_parser.set_defaults(train_args=[])
   train_parser.set_defaults(func=cmd_train)
 
   download_parser = subparsers.add_parser("download")
@@ -833,10 +833,17 @@ def main() -> None:
 
   jobs_parser = subparsers.add_parser("jobs")
   add_setup_args(jobs_parser)
-  jobs_parser.add_argument("job_args", nargs=argparse.REMAINDER)
+  jobs_parser.set_defaults(job_args=[])
   jobs_parser.set_defaults(func=cmd_jobs)
 
-  args = parser.parse_args()
+  args, passthrough_args = parser.parse_known_args()
+  if passthrough_args:
+    if args.command in {"smoke", "train"}:
+      args.train_args = [*args.train_args, *passthrough_args]
+    elif args.command == "jobs":
+      args.job_args = [*args.job_args, *passthrough_args]
+    else:
+      parser.error(f"unrecognized arguments: {' '.join(passthrough_args)}")
   args.func(args)
 
 
