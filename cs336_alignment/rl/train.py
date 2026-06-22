@@ -257,13 +257,19 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
   logger.info("Running GRPO train steps")
 
   if config.inference == "vllm":
-    logger.info("Initializing weight sync with vLLM inference engine at %s", config.inference)
-    from ..vllm_utils import VLLMServer, init_weight_sync
+    from ..vllm_utils import VLLMServer
     model_id = config.model_path() or config.vllm_model
-    vllm = VLLMServer(str(model_id), config.vllm_model)
+    logger.info("Initializing weight sync with vLLM inference engine at %s, with model_id=%s", config.inference, model_id)
+    kwargs = {
+      "gpu": config.vllm_gpu(),
+      **config.vllm_params,
+    }
+    vllm = VLLMServer(str(model_id), **kwargs)
+    vllm.start()
 
-    init_weight_sync(config.inference, config.device)
+    vllm.init_weight_sync(config.device)
   else:
+    logger.info("Inference engine: %s", config.inference)
     vllm = None
 
   for step in state.progress(range(start_step, config.num_rollout_steps), desc="training", unit="step"):

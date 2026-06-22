@@ -26,11 +26,25 @@ def parse_optimizer_params(raw_params: str) -> dict[str, Any]:
   return params
 
 
+def parse_json_object(raw_params: str, option_name: str) -> dict[str, Any]:
+  try:
+    params = json.loads(raw_params)
+  except json.JSONDecodeError as error:
+    raise argparse.ArgumentTypeError(f"Invalid {option_name} JSON: {error}") from error
+  if not isinstance(params, dict):
+    raise argparse.ArgumentTypeError(f"{option_name} must decode to a JSON object")
+  return params
+
+
+def parse_vllm_params(raw_params: str) -> dict[str, Any]:
+  return parse_json_object(raw_params, "--vllm-params")
+
+
 def inference_base_url(inference: str | None) -> str | None:
   if inference is None or inference == "smoke":
     return None
   if inference == "vllm":
-    return os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
+    return inference
   if inference.startswith("http://") or inference.startswith("https://"):
     return inference
   raise argparse.ArgumentTypeError("--inference must be 'smoke', 'vllm', or an http(s) URL")
@@ -45,6 +59,7 @@ class TrainConfig:
   inference: str | None = None
   vllm_model: str = ""
   vllm_device: str = "cuda:0"
+  vllm_params: dict[str, Any] = field(default_factory=dict)
   inference_batch_size: int = 5
   sampling_temperature: float = 1.0
   sampling_max_tokens: int = 512
@@ -87,6 +102,8 @@ class TrainConfig:
       config_data.pop("model_path")
     if "inference" in config_data:
       config_data["inference"] = inference_base_url(config_data["inference"])
+    if config_data.get("vllm_params") is None:
+      config_data["vllm_params"] = {}
     if config_data.get("optimizer_params") is None:
       config_data["optimizer_params"] = {}
     if "betas" in config_data.get("optimizer_params", {}):
@@ -105,6 +122,11 @@ class TrainConfig:
 
   def to_json(self) -> str:
     return json.dumps(self.to_dict(), indent=2, sort_keys=True)
+
+  def vllm_gpu(self) -> int:
+    if self.vllm_device.startswith("cuda:"):
+      return int(self.vllm_device.split(":")[1])
+    raise ValueError(f"vllm_device must be a CUDA device, got {self.vllm_device}")
 
   @classmethod
   def from_json(cls, raw: str) -> TrainConfig:
@@ -190,6 +212,12 @@ def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
   parser.add_argument("--inference", type=inference_base_url, default=argparse.SUPPRESS)
   parser.add_argument("--vllm-model", default=argparse.SUPPRESS)
   parser.add_argument("--vllm-device", default=argparse.SUPPRESS)
+  parser.add_argument(
+    "--vllm-params",
+    type=parse_vllm_params,
+    default=argparse.SUPPRESS,
+    help='Extra vLLM kwargs as JSON, e.g. \'{"gpu_memory_utilization":0.8}\'.',
+  )
   parser.add_argument("--inference-batch-size", type=int, default=argparse.SUPPRESS)
   parser.add_argument("--sampling-temperature", type=float, default=argparse.SUPPRESS)
   parser.add_argument("--temperature", type=float, dest="sampling_temperature", default=argparse.SUPPRESS)

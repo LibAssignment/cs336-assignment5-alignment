@@ -124,7 +124,9 @@ def start_server(
     logging_level: str,
     gpu_memory_utilization: float = 0.9,
 ) -> subprocess.Popen:
+    print(f"Starting vLLM server with model_id={model_id} on port {port} with GPU {gpu}")
     env = os.environ.copy()
+    env["HF_HUB_OFFLINE"] = "1"
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     env["VLLM_SERVER_DEV_MODE"] = "1"
     env["VLLM_LOGGING_LEVEL"] = logging_level

@@ -605,18 +605,25 @@ def ensure_remote_ready(remote: RemoteConfig, setup: SetupConfig) -> SetupConfig
 
 def remote_train_command(remote: RemoteConfig, setup: SetupConfig, train_args: list[str], log_path: str | None = None) -> str:
   quoted_train_args = " ".join(shlex.quote(arg) for arg in ["--model", setup.model, *train_args])
+  train_command = f"{proxy_env(setup)}{uv_run_prefix(remote, setup)} python -u scripts/train.py {quoted_train_args} "
   command = (
     f"cd {remote.quoted_remote_dir} && "
-    f"{proxy_env(setup)}{uv_run_prefix(remote, setup)} python -u scripts/train.py {quoted_train_args} "
+    f"{train_command}"
   )
   if log_path is None:
     return command
   quoted_log_path = remote_quote(log_path)
+  logged_command = shell_join([
+    "bash",
+    "-o",
+    "pipefail",
+    "-lc",
+    f"{train_command}2>&1 | tee {quoted_log_path}",
+  ])
   return (
     f"cd {remote.quoted_remote_dir} && "
     f"mkdir -p {remote_quote(str(Path(log_path).parent))} && "
-    f"{proxy_env(setup)}{uv_run_prefix(remote, setup)} python -u scripts/train.py {quoted_train_args} "
-    f"2>&1 | tee {quoted_log_path}"
+    f"{logged_command}"
   )
 
 
