@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -20,6 +21,7 @@ except ImportError:  # pragma: no cover - tqdm is optional for this helper.
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROL_PATH = "~/.ssh/cm-%r@%h:%p"
+DEFAULT_UV_EXTRAS = ("plots",)
 OLMO2_1B_MODEL_ID = "allenai/OLMo-2-0425-1B"
 OLMO2_1B_REVISION = "a1847dff35000b4271fa70afc5db10fd29fedbdf"
 OLMO2_1B_CACHE_PATH = (
@@ -76,7 +78,8 @@ class RemoteConfig:
 @dataclass(frozen=True)
 class SetupConfig:
   model: str = "tiny"
-  uv_extras: tuple[str, ...] = ("plots",)
+  uv_extras: tuple[str, ...] = DEFAULT_UV_EXTRAS
+  uv_extras_explicit: bool = False
   proxy: str | None = None
 
 
@@ -161,7 +164,7 @@ def should_include(path: Path) -> bool:
 
 
 def progress_paths(paths: list[Path], remote: RemoteConfig, desc: str):
-  if remote.quiet or tqdm is None:
+  if remote.verbosity == 0 or remote.quiet or tqdm is None:
     return paths
   return tqdm(paths, desc=desc, unit="file")
 
@@ -169,6 +172,10 @@ def progress_paths(paths: list[Path], remote: RemoteConfig, desc: str):
 def file_digest(path: Path) -> tuple[str, int]:
   data = path.read_bytes()
   return hashlib.sha256(data).hexdigest(), len(data)
+
+
+def uv_lock_digest() -> str:
+  return file_digest(REPO_ROOT / "uv.lock")[0]
 
 
 def git_output(args: list[str]) -> str:
@@ -294,7 +301,35 @@ def uv_run_prefix(remote: RemoteConfig, setup: SetupConfig) -> str:
   return shell_join(["uv", *verbosity_args(remote), "run", "--offline", *uv_extra_args(setup)])
 
 
-def open_master(remote: RemoteConfig) -> None:
+def ssh_control_command(remote: RemoteConfig, operation: str) -> list[str]:
+  cmd = ["ssh", "-S", remote.control_path, "-O", operation, remote.host]
+  if remote.quiet:
+    cmd.insert(1, "-q")
+  elif remote.external_verbosity > 0:
+    cmd.insert(1, "-" + "v" * remote.external_verbosity)
+  return cmd
+
+
+def ssh_master_running(remote: RemoteConfig) -> bool:
+  cmd = ssh_control_command(remote, "check")
+  if remote.show_commands and not remote.quiet:
+    print("+", " ".join(shlex.quote(part) for part in cmd))
+  if remote.dry_run:
+    return False
+  result = subprocess.run(
+    cmd,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    check=False,
+  )
+  return result.returncode == 0
+
+
+def open_master(remote: RemoteConfig) -> bool:
+  if ssh_master_running(remote):
+    if remote.verbosity > 0 and not remote.quiet:
+      print("reusing existing ssh master")
+    return False
   cmd = [
     "ssh",
     "-M",
@@ -310,24 +345,26 @@ def open_master(remote: RemoteConfig) -> None:
   elif remote.external_verbosity > 0:
     cmd.insert(1, "-" + "v" * remote.external_verbosity)
   run(cmd, dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
+  return True
 
 
 def close_master(remote: RemoteConfig) -> None:
-  cmd = ["ssh", "-S", remote.control_path, "-O", "exit", remote.host]
-  if remote.quiet:
-    cmd.insert(1, "-q")
-  elif remote.external_verbosity > 0:
-    cmd.insert(1, "-" + "v" * remote.external_verbosity)
-  run(cmd, dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
+  run(
+    ssh_control_command(remote, "exit"),
+    dry_run=remote.dry_run,
+    quiet=remote.quiet,
+    show_command=remote.show_commands,
+  )
 
 
 @contextmanager
 def ssh_master(remote: RemoteConfig):
-  open_master(remote)
+  opened_master = open_master(remote)
   try:
     yield
   finally:
-    close_master(remote)
+    if opened_master and False:
+      close_master(remote)
 
 
 def remote_git_dir(remote: RemoteConfig) -> str:
@@ -336,6 +373,77 @@ def remote_git_dir(remote: RemoteConfig) -> str:
 
 def remote_meta_dir(remote: RemoteConfig) -> str:
   return f"{remote.quoted_remote_dir}/.remote"
+
+
+def remote_uv_json_path(remote: RemoteConfig) -> str:
+  return f"{remote_meta_dir(remote)}/uv.json"
+
+
+def read_remote_uv_json(remote: RemoteConfig) -> dict:
+  raw = ssh_capture(remote, f"cat {remote_uv_json_path(remote)} 2>/dev/null || true")
+  if not raw:
+    return {}
+  try:
+    metadata = json.loads(raw)
+  except json.JSONDecodeError:
+    if remote.verbosity > 0 and not remote.quiet:
+      print("ignoring unreadable remote uv metadata")
+    return {}
+  return metadata if isinstance(metadata, dict) else {}
+
+
+def metadata_uv_extras(metadata: dict) -> tuple[str, ...] | None:
+  extras = metadata.get("uv_extras")
+  if not isinstance(extras, list) or not all(isinstance(extra, str) for extra in extras):
+    return None
+  return tuple(extras)
+
+
+def resolve_setup_extras(remote: RemoteConfig, setup: SetupConfig, metadata: dict) -> SetupConfig:
+  if setup.uv_extras_explicit:
+    return setup
+  remote_extras = metadata_uv_extras(metadata)
+  if remote_extras is None:
+    return setup
+  if remote_extras != setup.uv_extras and remote.verbosity > 0 and not remote.quiet:
+    print(f"using remote uv extras: {', '.join(remote_extras) or '(none)'}")
+  return SetupConfig(
+    model=setup.model,
+    uv_extras=remote_extras,
+    uv_extras_explicit=setup.uv_extras_explicit,
+    proxy=setup.proxy,
+  )
+
+
+def remote_uv_is_synced(metadata: dict, lock_digest: str, extras: tuple[str, ...]) -> bool:
+  return (
+    metadata.get("uv_lock_sha256") == lock_digest
+    and metadata_uv_extras(metadata) == extras
+  )
+
+
+def write_remote_uv_json_command(lock_digest: str, extras: tuple[str, ...]) -> str:
+  payload = json.dumps(
+    {
+      "uv_lock_sha256": lock_digest,
+      "uv_extras": list(extras),
+    },
+    sort_keys=True,
+  )
+  script = "\n".join(
+    [
+      "import datetime",
+      "import json",
+      "import pathlib",
+      "",
+      f'metadata = json.loads("""{payload}""")',
+      'metadata["synced_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()',
+      'path = pathlib.Path(".remote/uv.json")',
+      "path.parent.mkdir(parents=True, exist_ok=True)",
+      'print(json.dumps(metadata, indent=2, sort_keys=True), file=path.open("w"))',
+    ]
+  )
+  return "\n".join(["{ python - <<PY", script, "PY", "}"])
 
 
 def remote_has_commit(remote: RemoteConfig, commit: str) -> bool:
@@ -466,20 +574,33 @@ def sync_code(remote: RemoteConfig) -> None:
   apply_patch_zip(remote)
 
 
-def setup_remote(remote: RemoteConfig, setup: SetupConfig) -> None:
-  commands = [f"{proxy_env(setup)}{uv_sync_prefix(remote, setup)}"]
+def setup_remote(remote: RemoteConfig, setup: SetupConfig) -> SetupConfig:
+  metadata = read_remote_uv_json(remote)
+  setup = resolve_setup_extras(remote, setup, metadata)
+  lock_digest = uv_lock_digest()
+  commands = []
+  if remote_uv_is_synced(metadata, lock_digest, setup.uv_extras):
+    if remote.verbosity > 0 and not remote.quiet:
+      print("remote uv sync is current")
+  else:
+    commands.append(
+      f"{proxy_env(setup)}{uv_sync_prefix(remote, setup)} && "
+      f"{write_remote_uv_json_command(lock_digest, setup.uv_extras)}"
+    )
   if setup.model == "olmo2-1B":
     commands.append(
       f"( test -d {OLMO2_1B_CACHE_PATH} || "
       f"{proxy_env(setup)}{uv_run_prefix(remote, setup)} hf download "
       f"{shlex.quote(OLMO2_1B_MODEL_ID)} --revision {OLMO2_1B_REVISION} )"
     )
-  ssh(remote, f"cd {remote.quoted_remote_dir} && {' && '.join(commands)}")
+  if commands:
+    ssh(remote, f"cd {remote.quoted_remote_dir} && {' && '.join(commands)}")
+  return setup
 
 
-def ensure_remote_ready(remote: RemoteConfig, setup: SetupConfig) -> None:
+def ensure_remote_ready(remote: RemoteConfig, setup: SetupConfig) -> SetupConfig:
   sync_code(remote)
-  setup_remote(remote, setup)
+  return setup_remote(remote, setup)
 
 
 def remote_train_command(remote: RemoteConfig, setup: SetupConfig, train_args: list[str], log_path: str | None = None) -> str:
@@ -571,23 +692,34 @@ def remote_from_args(args: argparse.Namespace) -> RemoteConfig:
 
 
 def setup_from_args(args: argparse.Namespace) -> SetupConfig:
+  uv_extras = getattr(args, "uv_extras", None)
   return SetupConfig(
     model=getattr(args, "model", "tiny"),
-    uv_extras=tuple(getattr(args, "uv_extras", None) or ("plots",)),
+    uv_extras=tuple(uv_extras or DEFAULT_UV_EXTRAS),
+    uv_extras_explicit=uv_extras is not None,
     proxy=getattr(args, "proxy", None),
   )
 
 
-def download_results(remote: RemoteConfig, local_out: str, local_wandb: str) -> None:
-  Path(local_out).mkdir(parents=True, exist_ok=True)
-  Path(local_wandb).mkdir(parents=True, exist_ok=True)
+def local_host_dir_name(host: str) -> str:
+  hostname = host.rsplit("@", 1)[-1]
+  safe_hostname = "".join(char if char.isalnum() or char in ".-" else "_" for char in hostname)
+  return safe_hostname.strip("._") or "remote"
+
+
+def download_results(remote: RemoteConfig, local_out: str) -> None:
+  host_out = Path(local_out) / local_host_dir_name(remote.host)
+  local_jobs = host_out / "jobs"
+  local_wandb = host_out / "wandb"
+  local_jobs.mkdir(parents=True, exist_ok=True)
+  local_wandb.mkdir(parents=True, exist_ok=True)
   run([
     "rsync",
     "-az",
     "-e",
     rsync_ssh(remote),
-    f"{remote.host}:{remote_quote(remote.remote_dir.rstrip('/') + '/out/')}",
-    f"{local_out.rstrip('/')}/",
+    f"{remote.host}:{remote_quote(remote.remote_dir.rstrip('/') + '/out/jobs/')}",
+    f"{local_jobs}/",
   ], dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
   run([
     "rsync",
@@ -595,7 +727,7 @@ def download_results(remote: RemoteConfig, local_out: str, local_wandb: str) -> 
     "-e",
     rsync_ssh(remote),
     f"{remote.host}:{remote_quote(remote.remote_dir.rstrip('/') + '/wandb/')}",
-    f"{local_wandb.rstrip('/')}/",
+    f"{local_wandb}/",
   ], dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
 
 
@@ -617,7 +749,7 @@ def cmd_smoke(args: argparse.Namespace) -> None:
   setup = setup_from_args(args)
   train_args = tuple(remainder_args(args.train_args))
   with ssh_master(remote):
-    ensure_remote_ready(remote, setup)
+    setup = ensure_remote_ready(remote, setup)
     run_smoke(remote, setup, train_args, args.smoke_group_size, args.smoke_log_path)
 
 
@@ -626,7 +758,7 @@ def cmd_train(args: argparse.Namespace) -> None:
   setup = setup_from_args(args)
   train_args = tuple(remainder_args(args.train_args))
   with ssh_master(remote):
-    ensure_remote_ready(remote, setup)
+    setup = ensure_remote_ready(remote, setup)
     run_smoke(remote, setup, train_args, args.smoke_group_size, args.smoke_log_path)
     ssh(remote, remote_train_command(remote, setup, force_job_args(train_args)))
 
@@ -634,7 +766,7 @@ def cmd_train(args: argparse.Namespace) -> None:
 def cmd_download(args: argparse.Namespace) -> None:
   remote = remote_from_args(args)
   with ssh_master(remote):
-    download_results(remote, args.local_out, args.local_wandb)
+    download_results(remote, args.local_out)
 
 
 def remote_jobs_command(remote: RemoteConfig, job_args: tuple[str, ...]) -> str:
@@ -649,7 +781,7 @@ def cmd_jobs(args: argparse.Namespace) -> None:
   remote = remote_from_args(args)
   setup = setup_from_args(args)
   with ssh_master(remote):
-    ensure_remote_ready(remote, setup)
+    setup = ensure_remote_ready(remote, setup)
     ssh(remote, remote_jobs_command(remote, tuple(args.job_args)))
 
 
@@ -697,7 +829,6 @@ def main() -> None:
 
   download_parser = subparsers.add_parser("download")
   download_parser.add_argument("--local-out", default="out")
-  download_parser.add_argument("--local-wandb", default="wandb")
   download_parser.set_defaults(func=cmd_download)
 
   jobs_parser = subparsers.add_parser("jobs")

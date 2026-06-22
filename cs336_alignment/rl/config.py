@@ -51,8 +51,8 @@ class TrainConfig:
   n_train_examples: int = 6400
   n_val_examples: int = 1024
   rollout_batch_size: int = 256
-  group_size: int = 2
-  num_rollout_steps: int = 1
+  group_size: int = 8
+  num_rollout_steps: int = 200
   device: str = "cpu"
   optimizer: str = "adamw"
   lr: float = 1e-3
