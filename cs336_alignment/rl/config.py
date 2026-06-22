@@ -60,7 +60,7 @@ class TrainConfig:
   vllm_model: str = ""
   vllm_device: str = "cuda:0"
   vllm_params: dict[str, Any] = field(default_factory=dict)
-  inference_batch_size: int = 5
+  inference_batch_size: int | None = None
   sampling_temperature: float = 1.0
   sampling_max_tokens: int = 512
   seed: int = 42
@@ -113,6 +113,11 @@ class TrainConfig:
   def num_rollout_prompts(self) -> int:
     if self.rollout_batch_size % self.group_size != 0:
       raise ValueError("rollout_batch_size must be divisible by group_size")
+    return self.rollout_batch_size // self.group_size
+
+  def rollout_microbatch_size(self) -> int:
+    if self.inference_batch_size is not None:
+      return self.inference_batch_size
     return self.rollout_batch_size // self.group_size
 
   def model_path(self) -> Path | None:
@@ -183,7 +188,9 @@ class JobConfig:
   job_root: Path = Path("out/jobs")
   run_id: int | None = None
   resume: bool = False
-  checkpoint_every: int = 1
+  checkpoint_every: int = 100
+  rollout_every: int = 40
+  validate_every: int = 40
 
   def to_dict(self) -> dict[str, Any]:
     return {
@@ -193,6 +200,8 @@ class JobConfig:
       "run_id": self.run_id,
       "resume": self.resume,
       "checkpoint_every": self.checkpoint_every,
+      "rollout_every": self.rollout_every,
+      "validate_every": self.validate_every,
     }
 
 
@@ -263,7 +272,9 @@ def add_job_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
   parser.add_argument("--job-root", type=Path, default=Path("out/jobs"))
   parser.add_argument("--run-id", type=int, default=None)
   parser.add_argument("--resume", action="store_true")
-  parser.add_argument("--checkpoint-every", type=int, default=1)
+  parser.add_argument("--checkpoint-every", type=int, default=100)
+  parser.add_argument("--rollout-every", type=int, default=40)
+  parser.add_argument("--validate-every", type=int, default=40)
   return parser
 
 
@@ -291,6 +302,8 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
       "run_id",
       "resume",
       "checkpoint_every",
+      "rollout_every",
+      "validate_every",
     }:
       continue
     setattr(config, key, value)
@@ -317,6 +330,8 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
     run_id=args.run_id,
     resume=args.resume,
     checkpoint_every=args.checkpoint_every,
+    rollout_every=args.rollout_every,
+    validate_every=args.validate_every,
   )
 
   return ParsedConfig(train=config, wandb=wandb_config, job=job_config)

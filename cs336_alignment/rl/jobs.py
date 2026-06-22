@@ -228,6 +228,16 @@ def latest_step(path: Path) -> int | None:
     return None
 
 
+def metadata_step(metadata: dict[str, Any]) -> int | None:
+  value = metadata.get("step")
+  if value is None:
+    return None
+  try:
+    return int(value)
+  except (TypeError, ValueError):
+    return None
+
+
 def target_steps(path: Path) -> int | None:
   config = read_json(path / "train_config.json")
   value = config.get("num_rollout_steps")
@@ -264,11 +274,12 @@ def job_summary(path: Path) -> dict[str, Any]:
   duration = None
   if created_at is not None and end_time is not None:
     duration = max(0.0, float(end_time) - float(created_at))
+  step = metadata_step(metadata)
   return {
     "run_id": run_id,
     "status": status,
     "pid": pid,
-    "latest_step": latest_step(path),
+    "latest_step": step if step is not None else latest_step(path),
     "target_steps": target_steps(path),
     "duration_seconds": duration,
     "updated_at": updated_at,

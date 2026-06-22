@@ -11,6 +11,8 @@ from typing import Iterable, TypeVar
 
 import torch
 
+from .utils import compute_rollout_rewards
+
 from .models import build_model_and_tokenizer, model_context_length
 from .grpo import grpo_train_step
 from .config import JobConfig, TrainConfig, WandbConfig
@@ -141,6 +143,8 @@ class TrainState:
       key = key.replace("/", "_")
       message += f" {key}={value:.6f}" if isinstance(value, float) else f" {key}={value}"
     logger.info(message)
+    if self.job is not None:
+      write_status(self.job, "running", step=step, metrics=values)
 
   def model_metrics(self, num_params: int, rollout_prompt_count: int, context_length: int | None) -> None:
     if self.wandb_run is None:
@@ -180,6 +184,19 @@ class TrainState:
     next_step = int(trainer_state["next_step"])
     logger.info("Loaded checkpoint: %s next_step=%d", checkpoint, next_step)
     return next_step
+
+  def save_rollout_samples(self, stem: str, prompts: list[str], outputs: list[str], ground_truths: list[str], step: int) -> None:
+    if self.job is None or self.job_config is None or self.job_config.rollout_every <= 0:
+      return None
+    if step % self.job_config.rollout_every != 0 and step != self.config.num_rollout_steps:
+      return None
+    path = self.job.path / "samples" / f"rollout_{stem}_step_{step}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+      for prompt, output, ground_truth in zip(prompts, outputs, ground_truths):
+        json.dump({"prompt": prompt, "output": output, "ground_truth": ground_truth}, f)
+        f.write("\n")
+    logger.info("Saved rollout samples: %s", path)
 
   def progress(self, iterable: Iterable[T], **kwargs) -> Iterable[T]:
     return progress(iterable, **kwargs)
@@ -221,6 +238,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
   device = torch.device(config.device)
 
   examples = load_gsm8k_examples(config.data_path, config.n_train_examples)
+  validate_examples = load_gsm8k_examples(config.data_path.with_stem("test"), config.n_val_examples)
   rollout_prompt_count = config.num_rollout_prompts()
   prompt = get_prompt(config.prompt)
   logger.info(
@@ -264,10 +282,13 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       "gpu": config.vllm_gpu(),
       **config.vllm_params,
     }
-    vllm = VLLMServer(str(model_id), **kwargs)
+    vllm = VLLMServer(str(model_id), **kwargs)  # type: ignore
     vllm.start()
 
-    vllm.init_weight_sync(config.device)
+    if config.device != "cpu":
+      vllm.init_weight_sync(config.device)
+    else:
+      logger.warning("Training on device=%s, but weight sync is only supported on GPU. If you are using CPU, this may not work as expected.", config.device)
   else:
     logger.info("Inference engine: %s", config.inference)
     vllm = None
@@ -290,8 +311,10 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
         config.sampling_temperature,
         config.sampling_max_tokens,
         config.seed + step,
-        config.inference_batch_size,
+        config.rollout_microbatch_size(),
       )
+    state.save_rollout_samples("train", prompts, outputs, ground_truths, step)
+
     logger.info(
       "Built rollout batch: step=%d prompt=%s prompts=%d outputs=%d ground_truths=%d reward_fn=%s",
       step,
@@ -327,5 +350,41 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
     }
     state.step_metrics(metrics, step=step)
     state.save_checkpoint(step + 1, model, optimizer)
+
+    if vllm is not None and config.device != "cpu":
+      vllm.sync_policy_weights(model)
+
+    if job_config and job_config.enabled and step % job_config.validate_every == 0:
+      group_size = 1
+      if config.inference is None or config.inference == "smoke":
+        prompts, outputs, ground_truths = make_smoke_rollouts(prompt, validate_examples, group_size)
+      else:
+        logger.info("Generating rollouts from inference endpoint: %s", config.inference)
+        prompts, outputs, ground_truths = make_vllm_rollouts(
+          vllm or config.inference,
+          config.vllm_model,
+          prompt,
+          validate_examples,
+          group_size,
+          config.sampling_temperature,
+          config.sampling_max_tokens,
+          config.seed + step,
+          config.rollout_microbatch_size() * config.group_size // group_size,
+        )
+      rewards = compute_rollout_rewards(
+        prompt.reward_fn,
+        outputs,
+        ground_truths,
+      )
+      metrics = {
+        "validate/reward/mean": rewards.raw_rewards.float().mean().item(),
+        "validate/reward/min": rewards.raw_rewards.float().min().item(),
+        "validate/reward/max": rewards.raw_rewards.float().max().item(),
+      }
+      if rewards.metadata is not None:
+        for key, value in rewards.metadata.items():
+          metrics[f"validate/{key}"] = value
+      state.step_metrics(metrics, step=step)
+      state.save_rollout_samples("validate", prompts, outputs, ground_truths, step)
 
   state.finish()

@@ -88,8 +88,8 @@ def make_smoke_rollouts(
   examples: list[dict[str, str]],
   group_size: int,
 ) -> tuple[list[str], list[str], list[str]]:
-  if group_size < 2:
-    raise ValueError("Use group_size >= 2 so each prompt has a correct and incorrect rollout.")
+  # if group_size < 2:
+  #   raise ValueError("Use group_size >= 2 so each prompt has a correct and incorrect rollout.")
 
   prompts: list[str] = []
   outputs: list[str] = []
@@ -108,6 +108,7 @@ def make_smoke_rollouts(
         f" incorrect. </think> <answer> {wrong_answer} </answer>",
       ]
     rollout_outputs.extend(rollout_outputs[-1] for _ in range(group_size - 2))
+    rollout_outputs = rollout_outputs[:group_size]
 
     prompts.extend([prompt.format(question=example["question"])] * group_size)
     outputs.extend(rollout_outputs)
