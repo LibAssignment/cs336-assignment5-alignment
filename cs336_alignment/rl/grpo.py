@@ -63,7 +63,7 @@ def grpo_train_step(
     advantage_normalizer=advantage_normalizer,
   )
 
-  macrobatch_size = len(prompt_strs) // gradient_accumulation_steps
+  macrobatch_size = (len(prompt_strs) - 1) // gradient_accumulation_steps + 1
 
   final_loss = torch.tensor(0.0, device=x.device)
   final_log_probs = []

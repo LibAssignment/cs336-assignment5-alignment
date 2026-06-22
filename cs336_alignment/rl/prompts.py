@@ -82,7 +82,7 @@ def make_wrong_answer(answer: str) -> str:
     return f"{value + 1:g}"
 
 
-def make_prompt_rollouts(
+def make_smoke_rollouts(
   prompt: Prompt,
   examples: list[dict[str, str]],
   group_size: int,

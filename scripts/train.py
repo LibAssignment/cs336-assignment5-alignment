@@ -8,13 +8,14 @@ from typing import Iterable, TypeVar
 
 import torch
 
+from cs336_alignment.checkpoint import get_model_and_tokenizer
 from cs336_alignment.rl.grpo import grpo_train_step
 from cs336_alignment.rl.config import TrainConfig, WandbConfig, parse_train_config
 from cs336_alignment.rl.models import tiny_byte_tokenizer, tiny_train_model
 from cs336_alignment.rl.prompts import (
   extract_gsm8k_answer,
   get_prompt,
-  make_prompt_rollouts,
+  make_smoke_rollouts,
   make_vllm_rollouts,
 )
 
@@ -47,6 +48,31 @@ def init_wandb(train_config: TrainConfig, wandb_config: WandbConfig):
     mode=wandb_config.mode,
     config=train_config.to_dict(),
   )
+
+
+def build_model_and_tokenizer(config: TrainConfig, device: torch.device):
+  if config.model == "tiny":
+    tokenizer = tiny_byte_tokenizer()
+    model = tiny_train_model(tokenizer, device=device)
+    return model, tokenizer
+  if config.model == "olmo2-1B":
+    model_path = config.model_path()
+    if model_path is None:
+      raise ValueError("model_path is required for olmo2-1B")
+    model, tokenizer = get_model_and_tokenizer(str(model_path), str(device))
+    if tokenizer.pad_token_id is None:
+      tokenizer.pad_token = tokenizer.eos_token
+    model.train()
+    return model, tokenizer
+  raise ValueError(f"Unknown model: {config.model}")
+
+
+def model_context_length(model) -> int | None:
+  for attr in ("n_positions", "max_position_embeddings", "seq_length"):
+    value = getattr(model.config, attr, None)
+    if value is not None:
+      return value
+  return None
 
 
 def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
@@ -93,16 +119,14 @@ def main() -> None:
     rollout_prompt_count,
     config.gradient_accumulation_steps,
   )
-  logger.info("Creating byte-level tokenizer with 256 byte tokens + 2 specials")
-  tokenizer = tiny_byte_tokenizer()
+  logger.info("Creating model=%s on %s", config.model, device)
+  model, tokenizer = build_model_and_tokenizer(config, device)
   logger.info(
     "Tokenizer ready: vocab_size=%d eos_token_id=%d pad_token_id=%d ",
     len(tokenizer),
     tokenizer.eos_token_id,
     tokenizer.pad_token_id,
   )
-  logger.info("Creating tiny_train_model on %s", device)
-  model = tiny_train_model(tokenizer, device=device)
   optimizer_kwargs = {
     "lr": config.lr,
     "weight_decay": config.weight_decay,
@@ -115,17 +139,17 @@ def main() -> None:
   else:
     raise ValueError(f"Unknown optimizer: {config.optimizer}")
   num_params = sum(param.numel() for param in model.parameters())
-  logger.info("Model ready on %s with %d parameters and context length %d", device, num_params, model.config.n_positions)
+  context_length = model_context_length(model)
+  logger.info("Model ready on %s with %d parameters and context length %s", device, num_params, context_length or "unknown")
   logger.info("Optimizer ready: %s params=%s", optimizer.__class__.__name__, optimizer_kwargs)
   if wandb_run is not None:
-    wandb_run.log(
-      {
-        "model/num_params": num_params,
-        "model/context_length": model.config.n_positions,
-        "rollout/rollout_prompt_count": rollout_prompt_count,
-      },
-      step=0,
-    )
+    model_metrics = {
+      "model/num_params": num_params,
+      "rollout/rollout_prompt_count": rollout_prompt_count,
+    }
+    if context_length is not None:
+      model_metrics["model/context_length"] = context_length
+    wandb_run.log(model_metrics, step=0)
   logger.info("Running GRPO train steps")
 
   for step in progress(range(config.num_rollout_steps), desc="training", unit="step"):
@@ -133,8 +157,8 @@ def main() -> None:
     start = (step * rollout_prompt_count) % len(examples)
     batch_examples = [examples[(start + i) % len(examples)] for i in range(rollout_prompt_count)]
 
-    if config.inference is None:
-      prompts, outputs, ground_truths = make_prompt_rollouts(prompt, batch_examples, config.group_size)
+    if config.inference is None or config.inference == "smoke":
+      prompts, outputs, ground_truths = make_smoke_rollouts(prompt, batch_examples, config.group_size)
     else:
       logger.info("Generating rollouts from inference endpoint: %s", config.inference)
       prompts, outputs, ground_truths = make_vllm_rollouts(

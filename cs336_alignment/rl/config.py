@@ -9,6 +9,10 @@ from typing import Any, NamedTuple
 
 from cs336_alignment.rl.prompts import PROMPT_KINDS
 
+DEFAULT_OLMO2_1B_PATH = Path(
+  "~/.cache/huggingface/hub/models--allenai--OLMo-2-0425-1B/snapshots/a1847dff35000b4271fa70afc5db10fd29fedbdf"
+)
+
 
 def parse_optimizer_params(raw_params: str) -> dict[str, Any]:
   try:
@@ -35,6 +39,8 @@ def inference_base_url(inference: str | None) -> str | None:
 @dataclass
 class TrainConfig:
   data_path: Path = Path("data/gsm8k/train.jsonl")
+  model: str = "tiny"
+  model_path_override: Path | None = None
   prompt: str = "question_only"
   inference: str | None = None
   vllm_model: str = ""
@@ -59,6 +65,8 @@ class TrainConfig:
   def to_dict(self) -> dict[str, Any]:
     result = asdict(self)
     result["data_path"] = str(self.data_path)
+    result["model_path"] = str(self.model_path_override) if self.model_path_override is not None else None
+    del result["model_path_override"]
     return result
 
   @classmethod
@@ -72,6 +80,10 @@ class TrainConfig:
       config_data["num_rollout_steps"] = config_data.pop("steps")
     if "data_path" in config_data:
       config_data["data_path"] = Path(config_data["data_path"])
+    if "model_path" in config_data and config_data["model_path"] is not None:
+      config_data["model_path_override"] = Path(config_data.pop("model_path"))
+    elif "model_path" in config_data:
+      config_data.pop("model_path")
     if "inference" in config_data:
       config_data["inference"] = inference_base_url(config_data["inference"])
     if config_data.get("optimizer_params") is None:
@@ -84,6 +96,11 @@ class TrainConfig:
     if self.rollout_batch_size % self.group_size != 0:
       raise ValueError("rollout_batch_size must be divisible by group_size")
     return self.rollout_batch_size // self.group_size
+
+  def model_path(self) -> Path | None:
+    if self.model == "olmo2-1B":
+      return (self.model_path_override or DEFAULT_OLMO2_1B_PATH).expanduser()
+    return None
 
   def to_json(self) -> str:
     return json.dumps(self.to_dict(), indent=2, sort_keys=True)
@@ -145,6 +162,8 @@ def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
   parser.add_argument("--config", type=Path, default=None)
   parser.add_argument("--save-config", type=Path, default=None)
   parser.add_argument("--data-path", type=Path, default=argparse.SUPPRESS)
+  parser.add_argument("--model", choices=["tiny", "olmo2-1B"], default=argparse.SUPPRESS)
+  parser.add_argument("--model-path", type=Path, dest="model_path_override", default=argparse.SUPPRESS)
   parser.add_argument("--prompt", choices=PROMPT_KINDS, default=argparse.SUPPRESS)
   parser.add_argument("--inference", type=inference_base_url, default=argparse.SUPPRESS)
   parser.add_argument("--vllm-model", default=argparse.SUPPRESS)
