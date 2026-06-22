@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Iterable, TypeVar
 
 import torch
 
+from cs336_alignment.rl.fixtures import extract_gsm8k_answer, gsm8k_reward_fn, make_rollouts
 from cs336_alignment.rl.grpo import grpo_train_step
 from cs336_alignment.rl.models import tiny_byte_tokenizer, tiny_train_model
 
@@ -22,24 +22,6 @@ def progress(iterable: Iterable[T], **kwargs) -> Iterable[T]:
   except ImportError:
     return iterable
   return tqdm(iterable, **kwargs)
-
-
-def extract_gsm8k_answer(answer: str) -> str:
-  if "####" in answer:
-    return answer.rsplit("####", maxsplit=1)[-1].strip().replace(",", "")
-  matches = re.findall(r"-?\d+(?:\.\d+)?", answer.replace(",", ""))
-  if not matches:
-    raise ValueError(f"Could not find numeric answer in: {answer!r}")
-  return matches[-1]
-
-
-def make_wrong_answer(answer: str) -> str:
-  try:
-    value = int(answer)
-    return str(value + 1)
-  except ValueError:
-    value = float(answer)
-    return f"{value + 1:g}"
 
 
 def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
@@ -58,52 +40,6 @@ def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
         break
   logger.info("Loaded %d examples", len(examples))
   return examples
-
-
-def make_prompt(question: str) -> str:
-  question_words = question.split()[:8]
-  return "Question: " + " ".join(question_words) + " Answer:"
-
-
-def make_rollouts(
-  examples: list[dict[str, str]],
-  group_size: int,
-) -> tuple[list[str], list[str], list[str]]:
-  if group_size < 2:
-    raise ValueError("Use group_size >= 2 so each prompt has a correct and incorrect rollout.")
-
-  prompts: list[str] = []
-  outputs: list[str] = []
-  ground_truths: list[str] = []
-  logger.info("Building rollout batch with group_size=%d", group_size)
-  for example in progress(examples, desc="building rollouts", unit="prompt"):
-    answer = example["answer"]
-    rollout_outputs = [f"#### {answer}", f"#### {make_wrong_answer(answer)}"]
-    rollout_outputs.extend(f"#### {make_wrong_answer(answer)}" for _ in range(group_size - 2))
-
-    prompt = make_prompt(example["question"])
-    prompts.extend([prompt] * group_size)
-    outputs.extend(rollout_outputs)
-    ground_truths.extend([answer] * group_size)
-
-  logger.info(
-    "Built rollout batch: prompts=%d outputs=%d ground_truths=%d",
-    len(prompts),
-    len(outputs),
-    len(ground_truths),
-  )
-  return prompts, outputs, ground_truths
-
-
-def gsm8k_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
-  parsed = extract_gsm8k_answer(response)
-  answer_reward = float(parsed == ground_truth)
-  format_reward = float("####" in response)
-  return {
-    "reward": answer_reward,
-    "format_reward": format_reward,
-    "answer_reward": answer_reward,
-  }
 
 
 def parse_args() -> argparse.Namespace:
@@ -139,7 +75,14 @@ def main() -> None:
   )
 
   examples = load_gsm8k_examples(args.data_path, args.num_prompts)
+  logger.info("Building rollout batch with group_size=%d", args.group_size)
   prompts, outputs, ground_truths = make_rollouts(examples, args.group_size)
+  logger.info(
+    "Built rollout batch: prompts=%d outputs=%d ground_truths=%d",
+    len(prompts),
+    len(outputs),
+    len(ground_truths),
+  )
   logger.info("Creating byte-level tokenizer with 256 byte tokens + 2 specials")
   tokenizer = tiny_byte_tokenizer()
   logger.info(
