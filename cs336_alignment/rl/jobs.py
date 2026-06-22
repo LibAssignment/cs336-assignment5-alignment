@@ -208,6 +208,25 @@ def latest_checkpoint(job: Job) -> Path | None:
   return path if path.exists() else None
 
 
+def latest_step(path: Path) -> int | None:
+  latest = path / "latest"
+  if not latest.exists():
+    return None
+  name = Path(latest.read_text().strip()).name
+  if not name.startswith("step_"):
+    return None
+  try:
+    return int(name.removeprefix("step_"))
+  except ValueError:
+    return None
+
+
+def target_steps(path: Path) -> int | None:
+  config = read_json(path / "train_config.json")
+  value = config.get("num_rollout_steps")
+  return int(value) if value is not None else None
+
+
 def process_is_alive(pid: int) -> bool:
   try:
     os.kill(pid, 0)
@@ -232,11 +251,20 @@ def job_summary(path: Path) -> dict[str, Any]:
       pid = None
   if status == "running" and pid is not None and not process_is_alive(pid):
     status = "stale"
+  created_at = metadata.get("created_at")
+  updated_at = metadata.get("updated_at")
+  end_time = now() if status == "running" else updated_at
+  duration = None
+  if created_at is not None and end_time is not None:
+    duration = max(0.0, float(end_time) - float(created_at))
   return {
     "run_id": run_id,
     "status": status,
     "pid": pid,
-    "updated_at": metadata.get("updated_at"),
+    "latest_step": latest_step(path),
+    "target_steps": target_steps(path),
+    "duration_seconds": duration,
+    "updated_at": updated_at,
     "path": str(path),
   }
 

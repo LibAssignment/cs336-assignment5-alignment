@@ -11,14 +11,41 @@ sys.path.insert(0, str(REPO_ROOT))
 from cs336_alignment.rl.jobs import find_job_dir, job_summary, list_jobs
 
 
+def format_duration(seconds: float | None) -> str:
+  if seconds is None:
+    return ""
+  total = int(seconds)
+  hours, remainder = divmod(total, 3600)
+  minutes, secs = divmod(remainder, 60)
+  if hours:
+    return f"{hours}h{minutes:02d}m{secs:02d}s"
+  if minutes:
+    return f"{minutes}m{secs:02d}s"
+  return f"{secs}s"
+
+
+def format_steps(row: dict) -> str:
+  latest = row.get("latest_step")
+  target = row.get("target_steps")
+  if latest is None and target is None:
+    return ""
+  if latest is None:
+    latest = 0
+  if target is None:
+    return str(latest)
+  return f"{latest}/{target}"
+
+
 def print_table(rows: list[dict]) -> None:
   if not rows:
     print("no jobs")
     return
-  print(f"{'run_id':>6}  {'status':<10}  {'pid':>8}  path")
+  print(f"{'run_id':>6}  {'status':<10}  {'step':>6}  {'duration':>10}  {'pid':>8}  path")
   for row in rows:
     pid = "" if row["pid"] is None else str(row["pid"])
-    print(f"{row['run_id']:>6}  {row['status']:<10}  {pid:>8}  {row['path']}")
+    step = format_steps(row)
+    duration = format_duration(row["duration_seconds"])
+    print(f"{row['run_id']:>6}  {row['status']:<10}  {step:>6}  {duration:>10}  {pid:>8}  {row['path']}")
 
 
 def cmd_list(args: argparse.Namespace) -> None:

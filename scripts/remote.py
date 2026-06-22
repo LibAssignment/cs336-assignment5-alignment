@@ -482,8 +482,14 @@ def ensure_remote_ready(remote: RemoteConfig, setup: SetupConfig) -> None:
   setup_remote(remote, setup)
 
 
-def remote_train_command(remote: RemoteConfig, setup: SetupConfig, train_args: list[str], log_path: str) -> str:
+def remote_train_command(remote: RemoteConfig, setup: SetupConfig, train_args: list[str], log_path: str | None = None) -> str:
   quoted_train_args = " ".join(shlex.quote(arg) for arg in ["--model", setup.model, *train_args])
+  command = (
+    f"cd {remote.quoted_remote_dir} && "
+    f"{proxy_env(setup)}{uv_run_prefix(remote, setup)} python -u scripts/train.py {quoted_train_args} "
+  )
+  if log_path is None:
+    return command
   quoted_log_path = remote_quote(log_path)
   return (
     f"cd {remote.quoted_remote_dir} && "
@@ -499,9 +505,35 @@ def remainder_args(values: list[str]) -> list[str]:
   return values
 
 
+def without_job_args(values: tuple[str, ...]) -> list[str]:
+  args = remainder_args(list(values))
+  result = []
+  skip_next = False
+  options_with_value = {"--job-root", "--run-id", "--checkpoint-every"}
+  for arg in args:
+    if skip_next:
+      skip_next = False
+      continue
+    if arg in {"--job", "--no-job", "--resume"}:
+      continue
+    if arg in options_with_value:
+      skip_next = True
+      continue
+    if any(arg.startswith(f"{option}=") for option in options_with_value):
+      continue
+    result.append(arg)
+  return result
+
+
+def force_job_args(values: tuple[str, ...]) -> list[str]:
+  args = remainder_args(list(values))
+  return ["--job", *(arg for arg in args if arg not in {"--job", "--no-job"})]
+
+
 def smoke_train_args(train_args: tuple[str, ...], smoke_group_size: int) -> list[str]:
   return [
-    *remainder_args(list(train_args)),
+    *without_job_args(train_args),
+    "--no-job",
     "--wandb-mode",
     "disabled",
     "--group-size",
@@ -596,13 +628,29 @@ def cmd_train(args: argparse.Namespace) -> None:
   with ssh_master(remote):
     ensure_remote_ready(remote, setup)
     run_smoke(remote, setup, train_args, args.smoke_group_size, args.smoke_log_path)
-    ssh(remote, remote_train_command(remote, setup, list(train_args), args.log_path))
+    ssh(remote, remote_train_command(remote, setup, force_job_args(train_args)))
 
 
 def cmd_download(args: argparse.Namespace) -> None:
   remote = remote_from_args(args)
   with ssh_master(remote):
     download_results(remote, args.local_out, args.local_wandb)
+
+
+def remote_jobs_command(remote: RemoteConfig, job_args: tuple[str, ...]) -> str:
+  quoted_job_args = " ".join(shlex.quote(arg) for arg in remainder_args(list(job_args)))
+  command = "python3 scripts/jobs.py"
+  if quoted_job_args:
+    command = f"{command} {quoted_job_args}"
+  return f"cd {remote.quoted_remote_dir} && {command}"
+
+
+def cmd_jobs(args: argparse.Namespace) -> None:
+  remote = remote_from_args(args)
+  setup = setup_from_args(args)
+  with ssh_master(remote):
+    ensure_remote_ready(remote, setup)
+    ssh(remote, remote_jobs_command(remote, tuple(args.job_args)))
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -642,7 +690,6 @@ def main() -> None:
 
   train_parser = subparsers.add_parser("train")
   add_setup_args(train_parser)
-  train_parser.add_argument("--log-path", default="out/train.log")
   train_parser.add_argument("--smoke-group-size", type=int, default=2)
   train_parser.add_argument("--smoke-log-path", default="out/smoke.log")
   train_parser.add_argument("train_args", nargs=argparse.REMAINDER)
@@ -652,6 +699,11 @@ def main() -> None:
   download_parser.add_argument("--local-out", default="out")
   download_parser.add_argument("--local-wandb", default="wandb")
   download_parser.set_defaults(func=cmd_download)
+
+  jobs_parser = subparsers.add_parser("jobs")
+  add_setup_args(jobs_parser)
+  jobs_parser.add_argument("job_args", nargs=argparse.REMAINDER)
+  jobs_parser.set_defaults(func=cmd_jobs)
 
   args = parser.parse_args()
   args.func(args)
