@@ -42,6 +42,18 @@ def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
   return examples
 
 
+def parse_optimizer_params(raw_params: str) -> dict:
+  try:
+    params = json.loads(raw_params)
+  except json.JSONDecodeError as error:
+    raise argparse.ArgumentTypeError(f"Invalid optimizer params JSON: {error}") from error
+  if not isinstance(params, dict):
+    raise argparse.ArgumentTypeError("--optimizer-params must decode to a JSON object")
+  if "betas" in params:
+    params["betas"] = tuple(params["betas"])
+  return params
+
+
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="Local smoke test for grpo_train_step on GSM8K.")
   parser.add_argument("--data-path", type=Path, default=Path("data/gsm8k/train.jsonl"))
@@ -49,7 +61,16 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--num-prompts", type=int, default=2)
   parser.add_argument("--group-size", type=int, default=2)
   parser.add_argument("--steps", type=int, default=1)
+  parser.add_argument("--device", default="cpu")
+  parser.add_argument("--optimizer", choices=["adamw", "sgd"], default="adamw")
   parser.add_argument("--lr", type=float, default=1e-3)
+  parser.add_argument("--weight-decay", type=float, default=0.0)
+  parser.add_argument(
+    "--optimizer-params",
+    type=parse_optimizer_params,
+    default=None,
+    help='Extra optimizer kwargs as JSON, e.g. \'{"betas":[0.9,0.95]}\' for AdamW.',
+  )
   parser.add_argument("--gradient-accumulation-steps", type=int, default=2)
   parser.add_argument("--max-grad-norm", type=float, default=1.0)
   parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -64,15 +85,19 @@ def main() -> None:
     datefmt="%H:%M:%S",
   )
   torch.manual_seed(0)
+  device = torch.device(args.device)
   logger.info("Starting local GRPO smoke test")
   logger.info(
-    "Config: prompt=%s num_prompts=%d group_size=%d rollout_batch=%d steps=%d lr=%g grad_accum=%d",
+    "Config: prompt=%s num_prompts=%d group_size=%d rollout_batch=%d steps=%d device=%s optimizer=%s lr=%g weight_decay=%g grad_accum=%d",
     args.prompt,
     args.num_prompts,
     args.group_size,
     args.num_prompts * args.group_size,
     args.steps,
+    device,
+    args.optimizer,
     args.lr,
+    args.weight_decay,
     args.gradient_accumulation_steps,
   )
 
@@ -96,11 +121,22 @@ def main() -> None:
     tokenizer.eos_token_id,
     tokenizer.pad_token_id,
   )
-  logger.info("Creating tiny_train_model on CPU")
-  model = tiny_train_model(tokenizer, device=torch.device("cpu"))
-  optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
+  logger.info("Creating tiny_train_model on %s", device)
+  model = tiny_train_model(tokenizer, device=device)
+  optimizer_kwargs = {
+    "lr": args.lr,
+    "weight_decay": args.weight_decay,
+    **(args.optimizer_params or {}),
+  }
+  if args.optimizer == "adamw":
+    optimizer = torch.optim.AdamW(model.parameters(), **optimizer_kwargs)
+  elif args.optimizer == "sgd":
+    optimizer = torch.optim.SGD(model.parameters(), **optimizer_kwargs)
+  else:
+    raise ValueError(f"Unknown optimizer: {args.optimizer}")
   num_params = sum(param.numel() for param in model.parameters())
-  logger.info("Model ready on CPU with %d parameters and context length %d", num_params, model.config.n_positions)
+  logger.info("Model ready on %s with %d parameters and context length %d", device, num_params, model.config.n_positions)
+  logger.info("Optimizer ready: %s params=%s", optimizer.__class__.__name__, optimizer_kwargs)
   logger.info("Running GRPO train steps")
 
   for step in progress(range(args.steps), desc="training", unit="step"):
