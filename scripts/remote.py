@@ -12,11 +12,20 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+  from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - tqdm is optional for this helper.
+  tqdm = None
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTROL_PATH = "~/.ssh/cm-%r@%h:%p"
 OLMO2_1B_MODEL_ID = "allenai/OLMo-2-0425-1B"
 OLMO2_1B_REVISION = "a1847dff35000b4271fa70afc5db10fd29fedbdf"
+OLMO2_1B_CACHE_PATH = (
+  "$HOME/.cache/huggingface/hub/models--allenai--OLMo-2-0425-1B/"
+  f"snapshots/{OLMO2_1B_REVISION}"
+)
 
 EXCLUDED_DIRS = {
   ".git",
@@ -48,10 +57,20 @@ class RemoteConfig:
   control_path: str
   control_persist: str
   dry_run: bool = False
+  verbosity: int = 0
+  quiet: bool = False
 
   @property
   def quoted_remote_dir(self) -> str:
     return remote_quote(self.remote_dir)
+
+  @property
+  def external_verbosity(self) -> int:
+    return max(0, min(self.verbosity - 1, 3))
+
+  @property
+  def show_commands(self) -> bool:
+    return self.verbosity > 0 or self.dry_run
 
 
 @dataclass(frozen=True)
@@ -61,22 +80,35 @@ class SetupConfig:
   proxy: str | None = None
 
 
-def run(cmd: list[str], dry_run: bool = False) -> subprocess.CompletedProcess:
-  print("+", " ".join(shlex.quote(part) for part in cmd))
+def run(
+  cmd: list[str],
+  dry_run: bool = False,
+  quiet: bool = False,
+  show_command: bool = False,
+) -> subprocess.CompletedProcess:
+  if show_command and not quiet:
+    print("+", " ".join(shlex.quote(part) for part in cmd))
   if dry_run:
     return subprocess.CompletedProcess(cmd, 0, "", "")
-  return subprocess.run(cmd, check=True, text=True)
+  result = subprocess.run(cmd, check=False, text=True)
+  if result.returncode != 0:
+    raise SystemExit(result.returncode)
+  return result
 
 
-def capture(cmd: list[str], dry_run: bool = False) -> str:
-  print("+", " ".join(shlex.quote(part) for part in cmd))
+def capture(cmd: list[str], dry_run: bool = False, quiet: bool = False, show_command: bool = False) -> str:
+  if show_command and not quiet:
+    print("+", " ".join(shlex.quote(part) for part in cmd))
   if dry_run:
     return ""
-  return subprocess.check_output(cmd, text=True).strip()
+  result = subprocess.run(cmd, check=False, stdout=subprocess.PIPE, text=True)
+  if result.returncode != 0:
+    raise SystemExit(result.returncode)
+  return result.stdout.strip()
 
 
 def ssh_base(remote: RemoteConfig) -> list[str]:
-  return [
+  cmd = [
     "ssh",
     "-S",
     remote.control_path,
@@ -85,14 +117,29 @@ def ssh_base(remote: RemoteConfig) -> list[str]:
     "-o",
     f"ControlPersist={remote.control_persist}",
   ]
+  if remote.quiet:
+    cmd.append("-q")
+  elif remote.external_verbosity > 0:
+    cmd.append("-" + "v" * remote.external_verbosity)
+  return cmd
 
 
 def ssh(remote: RemoteConfig, remote_command: str) -> None:
-  run([*ssh_base(remote), remote.host, remote_command], dry_run=remote.dry_run)
+  run(
+    [*ssh_base(remote), remote.host, remote_command],
+    dry_run=remote.dry_run,
+    quiet=remote.quiet,
+    show_command=remote.show_commands,
+  )
 
 
 def ssh_capture(remote: RemoteConfig, remote_command: str) -> str:
-  return capture([*ssh_base(remote), remote.host, remote_command], dry_run=remote.dry_run)
+  return capture(
+    [*ssh_base(remote), remote.host, remote_command],
+    dry_run=remote.dry_run,
+    quiet=remote.quiet,
+    show_command=remote.show_commands,
+  )
 
 
 def rsync_ssh(remote: RemoteConfig) -> str:
@@ -113,17 +160,99 @@ def should_include(path: Path) -> bool:
   return not any(fnmatch.fnmatch(name, pattern) for pattern in EXCLUDED_FILE_PATTERNS)
 
 
-def build_source_zip() -> tuple[Path, str, tempfile.TemporaryDirectory]:
+def progress_paths(paths: list[Path], remote: RemoteConfig, desc: str):
+  if remote.quiet or tqdm is None:
+    return paths
+  return tqdm(paths, desc=desc, unit="file")
+
+
+def file_digest(path: Path) -> tuple[str, int]:
+  data = path.read_bytes()
+  return hashlib.sha256(data).hexdigest(), len(data)
+
+
+def git_output(args: list[str]) -> str:
+  return subprocess.check_output(["git", *args], cwd=REPO_ROOT, text=True).strip()
+
+
+def git_head() -> str:
+  return git_output(["rev-parse", "HEAD"])
+
+
+def local_has_commit(commit: str) -> bool:
+  return subprocess.run(
+    ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+    cwd=REPO_ROOT,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    check=False,
+  ).returncode == 0
+
+
+def build_source_bundle(remote: RemoteConfig, base_commit: str | None) -> tuple[Path, str, tempfile.TemporaryDirectory]:
   tmpdir = tempfile.TemporaryDirectory(prefix="assignment5-remote-")
-  zip_path = Path(tmpdir.name) / "source.zip"
+  bundle_path = Path(tmpdir.name) / "source.bundle"
+  refspec = [f"{base_commit}..HEAD"] if base_commit else ["HEAD"]
+  if remote.verbosity > 0 and not remote.quiet:
+    print(f"source bundle refspec: {' '.join(refspec)}")
+  run(
+    ["git", "bundle", "create", str(bundle_path), *refspec],
+    quiet=remote.quiet,
+    show_command=remote.show_commands,
+  )
+  digest, size = file_digest(bundle_path)
+  print(f"source bundle sha256={digest} size={size} bytes")
+  return bundle_path, digest, tmpdir
+
+
+def changed_source_paths() -> tuple[list[Path], list[str]]:
+  changed_output = subprocess.check_output(
+    ["git", "diff", "--name-only", "-z", "HEAD", "--"],
+    cwd=REPO_ROOT,
+  )
+  untracked_output = subprocess.check_output(
+    ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+    cwd=REPO_ROOT,
+  )
+  relative_paths = {
+    path
+    for path in changed_output.decode().split("\0") + untracked_output.decode().split("\0")
+    if path
+  }
+
+  files: list[Path] = []
+  deleted: list[str] = []
+  for relative_path in sorted(relative_paths):
+    path = REPO_ROOT / relative_path
+    if not should_include(path):
+      continue
+    if path.is_file():
+      files.append(path)
+    else:
+      deleted.append(relative_path)
+  return files, deleted
+
+
+def build_patch_zip(remote: RemoteConfig) -> tuple[Path, str, tempfile.TemporaryDirectory]:
+  tmpdir = tempfile.TemporaryDirectory(prefix="assignment5-patch-")
+  zip_path = Path(tmpdir.name) / "patch.zip"
+  files, deleted = changed_source_paths()
+
+  if remote.verbosity > 0 and not remote.quiet:
+    print(f"patch zip file count: {len(files)} deleted={len(deleted)}")
+  if remote.verbosity > 1 and not remote.quiet:
+    for path in files:
+      print(path.relative_to(REPO_ROOT).as_posix())
+    for path in deleted:
+      print(f"{path} [deleted]")
 
   with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-    for path in sorted(REPO_ROOT.rglob("*")):
-      if path.is_dir() or not should_include(path):
-        continue
+    archive.writestr(".deleted", "\n".join(deleted) + ("\n" if deleted else ""))
+    for path in progress_paths(files, remote, "Building patch zip"):
       archive.write(path, path.relative_to(REPO_ROOT))
 
-  digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+  digest, size = file_digest(zip_path)
+  print(f"patch zip sha256={digest} size={size} bytes")
   return zip_path, digest, tmpdir
 
 
@@ -149,12 +278,24 @@ def uv_extra_args(setup: SetupConfig) -> list[str]:
   return args
 
 
-def uv_run_prefix(setup: SetupConfig) -> str:
-  return shell_join(["uv", "run", *uv_extra_args(setup)])
+def verbosity_args(remote: RemoteConfig) -> list[str]:
+  if remote.quiet:
+    return ["-q"]
+  if remote.external_verbosity > 0:
+    return ["-" + "v" * remote.external_verbosity]
+  return []
+
+
+def uv_sync_prefix(remote: RemoteConfig, setup: SetupConfig) -> str:
+  return shell_join(["uv", *verbosity_args(remote), "sync", *uv_extra_args(setup)])
+
+
+def uv_run_prefix(remote: RemoteConfig, setup: SetupConfig) -> str:
+  return shell_join(["uv", *verbosity_args(remote), "run", "--offline", *uv_extra_args(setup)])
 
 
 def open_master(remote: RemoteConfig) -> None:
-  run([
+  cmd = [
     "ssh",
     "-M",
     "-S",
@@ -163,11 +304,21 @@ def open_master(remote: RemoteConfig) -> None:
     f"ControlPersist={remote.control_persist}",
     "-fN",
     remote.host,
-  ], dry_run=remote.dry_run)
+  ]
+  if remote.quiet:
+    cmd.insert(1, "-q")
+  elif remote.external_verbosity > 0:
+    cmd.insert(1, "-" + "v" * remote.external_verbosity)
+  run(cmd, dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
 
 
 def close_master(remote: RemoteConfig) -> None:
-  run(["ssh", "-S", remote.control_path, "-O", "exit", remote.host], dry_run=remote.dry_run)
+  cmd = ["ssh", "-S", remote.control_path, "-O", "exit", remote.host]
+  if remote.quiet:
+    cmd.insert(1, "-q")
+  elif remote.external_verbosity > 0:
+    cmd.insert(1, "-" + "v" * remote.external_verbosity)
+  run(cmd, dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
 
 
 @contextmanager
@@ -179,47 +330,149 @@ def ssh_master(remote: RemoteConfig):
     close_master(remote)
 
 
-def sync_code(remote_config: RemoteConfig) -> None:
-  zip_path, digest, tmpdir = build_source_zip()
-  try:
-    remote = remote_config.quoted_remote_dir
-    remote_meta = f"{remote}/.remote"
-    remote_zip = f"{remote_meta}/source.zip"
-    remote_hash = f"{remote_meta}/source.sha256"
+def remote_git_dir(remote: RemoteConfig) -> str:
+  return f"{remote.quoted_remote_dir}/.remote/git"
 
-    ssh(remote_config, f"mkdir -p {remote_meta}")
-    existing_digest = ssh_capture(remote_config, f"cat {remote_hash} 2>/dev/null || true")
-    if existing_digest == digest:
-      print(f"remote source zip already present: sha256={digest}")
-      return
 
-    run([
+def remote_meta_dir(remote: RemoteConfig) -> str:
+  return f"{remote.quoted_remote_dir}/.remote"
+
+
+def remote_has_commit(remote: RemoteConfig, commit: str) -> bool:
+  result = ssh_capture(
+    remote,
+    f"git --git-dir {remote_git_dir(remote)} cat-file -e {shlex.quote(commit)}^{{commit}} 2>/dev/null && echo yes || true",
+  )
+  return result == "yes"
+
+
+def remote_synced_head(remote: RemoteConfig) -> str:
+  return ssh_capture(
+    remote,
+    f"git --git-dir {remote_git_dir(remote)} rev-parse refs/heads/synced 2>/dev/null || true",
+  )
+
+
+def upload_file(remote: RemoteConfig, local_path: Path, remote_path: str) -> None:
+  run(
+    [
       "rsync",
       "-az",
       "-e",
-      rsync_ssh(remote_config),
-      str(zip_path),
-      f"{remote_config.host}:{remote_zip}",
-    ], dry_run=remote_config.dry_run)
+      rsync_ssh(remote),
+      str(local_path),
+      f"{remote.host}:{remote_path}",
+    ],
+    dry_run=remote.dry_run,
+    quiet=remote.quiet,
+    show_command=remote.show_commands,
+  )
+
+
+def sync_bundle(remote: RemoteConfig, head: str) -> None:
+  meta = remote_meta_dir(remote)
+  git_dir = remote_git_dir(remote)
+  ssh(remote, f"mkdir -p {meta}")
+  ssh(remote, f"test -d {git_dir} || git init --bare {git_dir}")
+
+  if remote_has_commit(remote, head):
+    if remote.verbosity > 0 and not remote.quiet:
+      print(f"remote already has commit: {head}")
+    ssh(remote, f"git --git-dir {git_dir} update-ref refs/heads/synced {shlex.quote(head)}")
+    return
+
+  base_commit = remote_synced_head(remote)
+  if not base_commit or not local_has_commit(base_commit):
+    base_commit = None
+
+  bundle_path, bundle_digest, tmpdir = build_source_bundle(remote, base_commit)
+  try:
+    upload_file(remote, bundle_path, f"{meta}/source.bundle")
     ssh(
-      remote_config,
+      remote,
       (
-        f"cd {remote} && "
-        f"python3 -m zipfile -e .remote/source.zip . && "
-        f"printf %s {shlex.quote(digest)} > .remote/source.sha256"
+        f"cd {remote.quoted_remote_dir} && "
+        f"git --git-dir .remote/git fetch .remote/source.bundle +HEAD:refs/heads/synced && "
+        f"printf %s {shlex.quote(bundle_digest)} > .remote/source.bundle.sha256"
       ),
     )
-    print(f"uploaded and extracted source zip: sha256={digest}")
   finally:
     tmpdir.cleanup()
 
 
+def checkout_synced_commit(remote: RemoteConfig, head: str) -> None:
+  ssh(
+    remote,
+    (
+      f"cd {remote.quoted_remote_dir} && "
+      f"git --git-dir .remote/git --work-tree . checkout -f {shlex.quote(head)}"
+    ),
+  )
+
+
+def remote_patch_apply_script(patch_digest: str) -> str:
+  return "\n".join(
+    [
+      "import pathlib, shutil, zipfile",
+      'patch_dir = pathlib.Path(".remote/patch")',
+      "shutil.rmtree(patch_dir, ignore_errors=True)",
+      "patch_dir.mkdir(parents=True, exist_ok=True)",
+      'with zipfile.ZipFile(".remote/patch.zip") as archive:',
+      "  archive.extractall(patch_dir)",
+      'deleted = patch_dir / ".deleted"',
+      "if deleted.exists():",
+      "  for line in deleted.read_text().splitlines():",
+      "    if line:",
+      "      path = pathlib.Path(line)",
+      "      if path.exists() or path.is_symlink():",
+      "        path.unlink()",
+      "  deleted.unlink()",
+      'for src in patch_dir.rglob("*"):',
+      "  if src.is_dir():",
+      "    continue",
+      "  dst = pathlib.Path(src.relative_to(patch_dir))",
+      "  dst.parent.mkdir(parents=True, exist_ok=True)",
+      "  shutil.copy2(src, dst)",
+      f'pathlib.Path(".remote/patch.sha256").write_text("{patch_digest}")',
+    ]
+  )
+
+
+def apply_patch_zip(remote: RemoteConfig) -> None:
+  patch_path, patch_digest, tmpdir = build_patch_zip(remote)
+  try:
+    meta = remote_meta_dir(remote)
+    upload_file(remote, patch_path, f"{meta}/patch.zip")
+    script = remote_patch_apply_script(patch_digest)
+    ssh(
+      remote,
+      (
+        f"cd {remote.quoted_remote_dir} && "
+        "python3 - <<PY\n"
+        f"{script}\n"
+        "PY"
+      ),
+    )
+  finally:
+    tmpdir.cleanup()
+
+
+def sync_code(remote: RemoteConfig) -> None:
+  head = git_head()
+  if remote.verbosity > 0 and not remote.quiet:
+    print(f"local HEAD: {head}")
+  sync_bundle(remote, head)
+  checkout_synced_commit(remote, head)
+  apply_patch_zip(remote)
+
+
 def setup_remote(remote: RemoteConfig, setup: SetupConfig) -> None:
-  commands = [f"{proxy_env(setup)}{shell_join(['uv', 'sync', *uv_extra_args(setup)])}"]
+  commands = [f"{proxy_env(setup)}{uv_sync_prefix(remote, setup)}"]
   if setup.model == "olmo2-1B":
     commands.append(
-      f"{proxy_env(setup)}{uv_run_prefix(setup)} huggingface-cli download "
-      f"{shlex.quote(OLMO2_1B_MODEL_ID)} --revision {OLMO2_1B_REVISION}"
+      f"( test -d {OLMO2_1B_CACHE_PATH} || "
+      f"{proxy_env(setup)}{uv_run_prefix(remote, setup)} hf download "
+      f"{shlex.quote(OLMO2_1B_MODEL_ID)} --revision {OLMO2_1B_REVISION} )"
     )
   ssh(remote, f"cd {remote.quoted_remote_dir} && {' && '.join(commands)}")
 
@@ -235,7 +488,7 @@ def remote_train_command(remote: RemoteConfig, setup: SetupConfig, train_args: l
   return (
     f"cd {remote.quoted_remote_dir} && "
     f"mkdir -p {remote_quote(str(Path(log_path).parent))} && "
-    f"{proxy_env(setup)}{uv_run_prefix(setup)} python -u scripts/train.py {quoted_train_args} "
+    f"{proxy_env(setup)}{uv_run_prefix(remote, setup)} python -u scripts/train.py {quoted_train_args} "
     f"2>&1 | tee {quoted_log_path}"
   )
 
@@ -280,6 +533,8 @@ def remote_from_args(args: argparse.Namespace) -> RemoteConfig:
     control_path=args.control_path,
     control_persist=args.control_persist,
     dry_run=args.dry_run,
+    verbosity=args.verbosity,
+    quiet=args.quiet,
   )
 
 
@@ -301,7 +556,7 @@ def download_results(remote: RemoteConfig, local_out: str, local_wandb: str) -> 
     rsync_ssh(remote),
     f"{remote.host}:{remote_quote(remote.remote_dir.rstrip('/') + '/out/')}",
     f"{local_out.rstrip('/')}/",
-  ], dry_run=remote.dry_run)
+  ], dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
   run([
     "rsync",
     "-az",
@@ -309,7 +564,7 @@ def download_results(remote: RemoteConfig, local_out: str, local_wandb: str) -> 
     rsync_ssh(remote),
     f"{remote.host}:{remote_quote(remote.remote_dir.rstrip('/') + '/wandb/')}",
     f"{local_wandb.rstrip('/')}/",
-  ], dry_run=remote.dry_run)
+  ], dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
 
 
 def cmd_sync(args: argparse.Namespace) -> None:
@@ -356,6 +611,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
   parser.add_argument("--control-path", default=os.path.expanduser(DEFAULT_CONTROL_PATH))
   parser.add_argument("--control-persist", default="30m")
   parser.add_argument("--dry-run", action="store_true")
+  parser.add_argument("-v", dest="verbosity", action="count", default=0)
+  parser.add_argument("-q", "--quiet", action="store_true")
 
 
 def add_setup_args(parser: argparse.ArgumentParser) -> None:
