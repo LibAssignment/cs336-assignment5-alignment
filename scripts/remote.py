@@ -50,6 +50,10 @@ EXCLUDED_FILE_PATTERNS = {
   "*.tmp",
   ".DS_Store",
 }
+INCLUDED_IGNORED_PATHS = {
+  "wandb/config.json",
+  "wandb/.gitignore",
+}
 
 
 @dataclass(frozen=True)
@@ -154,7 +158,7 @@ def should_include(path: Path) -> bool:
   parts = relative.parts
 
   if parts and parts[0] == "wandb":
-    return relative.as_posix() in {"wandb/config.json", "wandb/.gitignore"}
+    return relative.as_posix() in INCLUDED_IGNORED_PATHS
 
   if any(part in EXCLUDED_DIRS for part in parts):
     return False
@@ -226,6 +230,11 @@ def changed_source_paths() -> tuple[list[Path], list[str]]:
     for path in changed_output.decode().split("\0") + untracked_output.decode().split("\0")
     if path
   }
+  relative_paths.update(
+    relative_path
+    for relative_path in INCLUDED_IGNORED_PATHS
+    if (REPO_ROOT / relative_path).exists()
+  )
 
   files: list[Path] = []
   deleted: list[str] = []

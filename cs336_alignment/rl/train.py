@@ -145,6 +145,9 @@ class TrainState:
     logger.info(message)
     if self.job is not None:
       write_status(self.job, "running", step=step, metrics=values)
+      with open(self.job.path / "metrics.jsonl", "a") as f:
+        json.dump({"step": step, **values}, f)
+        f.write("\n")
 
   def model_metrics(self, num_params: int, rollout_prompt_count: int, context_length: int | None) -> None:
     if self.wandb_run is None:
@@ -339,14 +342,14 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
     )
     metrics = {
       "train/loss": result.loss.item(),
-      "reward/mean": result.rewards.float().mean().item(),
-      "reward/min": result.rewards.float().min().item(),
-      "reward/max": result.rewards.float().max().item(),
-      "advantage/mean": result.advantages.float().mean().item(),
-      "advantage/std": result.advantages.float().std(unbiased=False).item(),
-      "rollout/batch_size": len(outputs),
-      "rollout/prompt_count": len(batch_examples),
-      "rollout/log_prob_seq_len": result.log_probs.shape[1],
+      "train/reward/mean": result.rewards.float().mean().item(),
+      "train/reward/min": result.rewards.float().min().item(),
+      "train/reward/max": result.rewards.float().max().item(),
+      "train/advantage/mean": result.advantages.float().mean().item(),
+      "train/advantage/std": result.advantages.float().std(unbiased=False).item(),
+      "train/rollout/batch_size": len(outputs),
+      "train/rollout/prompt_count": len(batch_examples),
+      "train/rollout/log_prob_seq_len": result.log_probs.shape[1],
     }
     state.step_metrics(metrics, step=step)
     state.save_checkpoint(step + 1, model, optimizer)
