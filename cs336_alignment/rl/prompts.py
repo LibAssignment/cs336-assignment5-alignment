@@ -113,3 +113,45 @@ def make_prompt_rollouts(
     ground_truths.extend([answer] * group_size)
 
   return prompts, outputs, ground_truths
+
+
+def make_vllm_rollouts(
+  base_url: str,
+  model_id: str,
+  prompt: Prompt,
+  examples: list[dict[str, str]],
+  group_size: int,
+  temperature: float,
+  max_tokens: int,
+  seed: int,
+  batch_size: int | None,
+) -> tuple[list[str], list[str], list[str]]:
+  from cs336_alignment.vllm_utils import generate_completions
+
+  prompt_strs = [prompt.format(question=example["question"]) for example in examples]
+  completions = generate_completions(
+    base_url,
+    model_id,
+    prompt_strs,
+    {
+      "temperature": temperature,
+      "max_tokens": max_tokens,
+      "n": group_size,
+      "seed": seed,
+    },
+    batch_size,
+  )
+  if len(completions) != len(examples) * group_size:
+    raise RuntimeError(f"Expected {len(examples) * group_size} completions, got {len(completions)}")
+
+  repeated_prompts: list[str] = []
+  outputs: list[str] = []
+  repeated_ground_truths: list[str] = []
+  for example_index, example in enumerate(examples):
+    start = example_index * group_size
+    end = start + group_size
+    repeated_prompts.extend([prompt_strs[example_index]] * group_size)
+    outputs.extend(completion.text for completion in completions[start:end])
+    repeated_ground_truths.extend([example["answer"]] * group_size)
+
+  return repeated_prompts, outputs, repeated_ground_truths

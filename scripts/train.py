@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Iterable, TypeVar
 
@@ -10,7 +11,13 @@ import torch
 
 from cs336_alignment.rl.grpo import grpo_train_step
 from cs336_alignment.rl.models import tiny_byte_tokenizer, tiny_train_model
-from cs336_alignment.rl.prompts import PROMPT_KINDS, extract_gsm8k_answer, get_prompt, make_prompt_rollouts
+from cs336_alignment.rl.prompts import (
+  PROMPT_KINDS,
+  extract_gsm8k_answer,
+  get_prompt,
+  make_prompt_rollouts,
+  make_vllm_rollouts,
+)
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -54,10 +61,26 @@ def parse_optimizer_params(raw_params: str) -> dict:
   return params
 
 
+def inference_base_url(inference: str) -> str | None:
+  if inference == "smoke":
+    return None
+  if inference == "vllm":
+    return os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
+  if inference.startswith("http://") or inference.startswith("https://"):
+    return inference
+  raise argparse.ArgumentTypeError("--inference must be 'smoke', 'vllm', or an http(s) URL")
+
+
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="Local smoke test for grpo_train_step on GSM8K.")
   parser.add_argument("--data-path", type=Path, default=Path("data/gsm8k/train.jsonl"))
   parser.add_argument("--prompt", choices=PROMPT_KINDS, default="question_only")
+  parser.add_argument("--inference", type=inference_base_url, default=None)
+  parser.add_argument("--vllm-model", default="")
+  parser.add_argument("--inference-batch-size", type=int, default=5)
+  parser.add_argument("--temperature", type=float, default=0.7)
+  parser.add_argument("--max-tokens", type=int, default=1000)
+  parser.add_argument("--seed", type=int, default=42)
   parser.add_argument("--num-prompts", type=int, default=2)
   parser.add_argument("--group-size", type=int, default=2)
   parser.add_argument("--steps", type=int, default=1)
@@ -88,8 +111,9 @@ def main() -> None:
   device = torch.device(args.device)
   logger.info("Starting local GRPO smoke test")
   logger.info(
-    "Config: prompt=%s num_prompts=%d group_size=%d rollout_batch=%d steps=%d device=%s optimizer=%s lr=%g weight_decay=%g grad_accum=%d",
+    "Config: prompt=%s inference=%s num_prompts=%d group_size=%d rollout_batch=%d steps=%d device=%s optimizer=%s lr=%g weight_decay=%g grad_accum=%d",
     args.prompt,
+    args.inference or "smoke",
     args.num_prompts,
     args.group_size,
     args.num_prompts * args.group_size,
@@ -104,7 +128,21 @@ def main() -> None:
   examples = load_gsm8k_examples(args.data_path, args.num_prompts)
   logger.info("Building rollout batch with group_size=%d", args.group_size)
   prompt = get_prompt(args.prompt)
-  prompts, outputs, ground_truths = make_prompt_rollouts(prompt, examples, args.group_size)
+  if args.inference is None:
+    prompts, outputs, ground_truths = make_prompt_rollouts(prompt, examples, args.group_size)
+  else:
+    logger.info("Generating rollouts from inference endpoint: %s", args.inference)
+    prompts, outputs, ground_truths = make_vllm_rollouts(
+      args.inference,
+      args.vllm_model,
+      prompt,
+      examples,
+      args.group_size,
+      args.temperature,
+      args.max_tokens,
+      args.seed,
+      args.inference_batch_size,
+    )
   logger.info(
     "Built rollout batch: prompt=%s prompts=%d outputs=%d ground_truths=%d reward_fn=%s",
     args.prompt,
