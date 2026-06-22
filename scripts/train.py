@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import logging
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Iterable, TypeVar
 
 import torch
 
 from cs336_alignment.rl.grpo import grpo_train_step
-from cs336_alignment.rl.config import parse_train_config
+from cs336_alignment.rl.config import TrainConfig, WandbConfig, parse_train_config
 from cs336_alignment.rl.models import tiny_byte_tokenizer, tiny_train_model
 from cs336_alignment.rl.prompts import (
   extract_gsm8k_answer,
@@ -27,6 +28,25 @@ def progress(iterable: Iterable[T], **kwargs) -> Iterable[T]:
   except ImportError:
     return iterable
   return tqdm(iterable, **kwargs)
+
+
+def init_wandb(train_config: TrainConfig, wandb_config: WandbConfig):
+  if not wandb_config.enabled:
+    return None
+  if wandb_config.api_key is not None:
+    os.environ.setdefault("WANDB_API_KEY", wandb_config.api_key)
+  try:
+    import wandb
+  except ImportError as error:
+    raise RuntimeError("wandb is not installed. Install the plots or gpu extra, or omit --wandb-project.") from error
+
+  return wandb.init(
+    project=wandb_config.project,
+    entity=wandb_config.entity,
+    name=wandb_config.run_name,
+    mode=wandb_config.mode,
+    config=train_config.to_dict(),
+  )
 
 
 def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
@@ -50,7 +70,9 @@ def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
 
 
 def main() -> None:
-  config = parse_train_config()
+  parsed_config = parse_train_config()
+  config = parsed_config.train
+  wandb_config = parsed_config.wandb
   logging.basicConfig(
     level=getattr(logging, config.log_level),
     format="%(asctime)s %(levelname)s %(message)s",
@@ -60,6 +82,7 @@ def main() -> None:
   device = torch.device(config.device)
   logger.info("Starting local GRPO smoke test")
   logger.info("Config: %s", config.to_json())
+  wandb_run = init_wandb(config, wandb_config)
 
   examples = load_gsm8k_examples(config.data_path, config.n_train_examples)
   rollout_prompt_count = config.num_rollout_prompts()
@@ -94,6 +117,15 @@ def main() -> None:
   num_params = sum(param.numel() for param in model.parameters())
   logger.info("Model ready on %s with %d parameters and context length %d", device, num_params, model.config.n_positions)
   logger.info("Optimizer ready: %s params=%s", optimizer.__class__.__name__, optimizer_kwargs)
+  if wandb_run is not None:
+    wandb_run.log(
+      {
+        "model/num_params": num_params,
+        "model/context_length": model.config.n_positions,
+        "rollout/rollout_prompt_count": rollout_prompt_count,
+      },
+      step=0,
+    )
   logger.info("Running GRPO train steps")
 
   for step in progress(range(config.num_rollout_steps), desc="training", unit="step"):
@@ -138,23 +170,39 @@ def main() -> None:
       gradient_accumulation_steps=config.gradient_accumulation_steps,
       max_grad_norm=config.max_grad_norm,
     )
+    metrics = {
+      "train/loss": result.loss.item(),
+      "reward/mean": result.rewards.float().mean().item(),
+      "reward/min": result.rewards.float().min().item(),
+      "reward/max": result.rewards.float().max().item(),
+      "advantage/mean": result.advantages.float().mean().item(),
+      "advantage/std": result.advantages.float().std(unbiased=False).item(),
+      "rollout/batch_size": len(outputs),
+      "rollout/prompt_count": len(batch_examples),
+      "rollout/log_prob_seq_len": result.log_probs.shape[1],
+    }
+    if wandb_run is not None:
+      wandb_run.log(metrics, step=step)
+
     message = (
       "step={step} loss={loss:.6f} reward_mean={reward_mean:.3f} "
       "reward_min={reward_min:.3f} reward_max={reward_max:.3f} "
       "advantage_mean={advantage_mean:.3f} advantage_std={advantage_std:.3f} "
       "log_prob_shape={log_prob_shape}".format(
         step=step,
-        loss=result.loss.item(),
-        reward_mean=result.rewards.float().mean().item(),
-        reward_min=result.rewards.float().min().item(),
-        reward_max=result.rewards.float().max().item(),
-        advantage_mean=result.advantages.float().mean().item(),
-        advantage_std=result.advantages.float().std(unbiased=False).item(),
+        loss=metrics["train/loss"],
+        reward_mean=metrics["reward/mean"],
+        reward_min=metrics["reward/min"],
+        reward_max=metrics["reward/max"],
+        advantage_mean=metrics["advantage/mean"],
+        advantage_std=metrics["advantage/std"],
         log_prob_shape=tuple(result.log_probs.shape),
       )
     )
     logger.info(message)
 
+  if wandb_run is not None:
+    wandb_run.finish()
   logger.info("Done")
 
 

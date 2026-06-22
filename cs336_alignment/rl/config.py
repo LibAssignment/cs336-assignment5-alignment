@@ -5,7 +5,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from cs336_alignment.rl.prompts import PROMPT_KINDS
 
@@ -103,6 +103,44 @@ class TrainConfig:
     return cls.from_json(path.read_text())
 
 
+@dataclass
+class WandbConfig:
+  project: str | None = None
+  entity: str | None = None
+  run_name: str | None = None
+  mode: str | None = None
+  api_key: str | None = None
+
+  @property
+  def enabled(self) -> bool:
+    return self.project is not None
+
+  def to_dict(self) -> dict[str, Any]:
+    return asdict(self)
+
+  @classmethod
+  def from_dict(cls, data: dict[str, Any]) -> WandbConfig:
+    config_data = dict(data)
+    if "name" in config_data and "run_name" not in config_data:
+      config_data["run_name"] = config_data.pop("name")
+    allowed_keys = {"project", "entity", "run_name", "mode", "api_key"}
+    return cls(**{key: value for key, value in config_data.items() if key in allowed_keys})
+
+  @classmethod
+  def load_json(cls, path: Path) -> WandbConfig:
+    if not path.exists():
+      return cls()
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+      raise ValueError(f"W&B config at {path} must decode to an object")
+    return cls.from_dict(data)
+
+
+class ParsedConfig(NamedTuple):
+  train: TrainConfig
+  wandb: WandbConfig
+
+
 def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
   parser.add_argument("--config", type=Path, default=None)
   parser.add_argument("--save-config", type=Path, default=None)
@@ -138,18 +176,50 @@ def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
   return parser
 
 
-def parse_train_config(argv: list[str] | None = None) -> TrainConfig:
+def add_wandb_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+  parser.add_argument("--wandb-config", type=Path, default=Path("wandb/config.json"))
+  parser.add_argument("--wandb-project", default=None)
+  parser.add_argument("--wandb-entity", default=None)
+  parser.add_argument("--wandb-run-name", default=None)
+  parser.add_argument("--wandb-mode", default=None, choices=["online", "offline", "disabled"])
+  parser.add_argument("--wandb-api-key", default=None)
+  return parser
+
+
+def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
   parser = argparse.ArgumentParser(description="Local smoke test for grpo_train_step on GSM8K.")
   add_train_config_args(parser)
+  add_wandb_config_args(parser)
   args = parser.parse_args(argv)
 
   config = TrainConfig.load_json(args.config) if args.config is not None else TrainConfig()
   for key, value in vars(args).items():
-    if key in {"config", "save_config"}:
+    if key in {
+      "config",
+      "save_config",
+      "wandb_config",
+      "wandb_project",
+      "wandb_entity",
+      "wandb_run_name",
+      "wandb_mode",
+      "wandb_api_key",
+    }:
       continue
     setattr(config, key, value)
 
   if args.save_config is not None:
     config.save_json(args.save_config)
 
-  return config
+  wandb_config = WandbConfig.load_json(args.wandb_config)
+  if args.wandb_project is not None:
+    wandb_config.project = args.wandb_project
+  if args.wandb_entity is not None:
+    wandb_config.entity = args.wandb_entity
+  if args.wandb_run_name is not None:
+    wandb_config.run_name = args.wandb_run_name
+  if args.wandb_mode is not None:
+    wandb_config.mode = args.wandb_mode
+  if args.wandb_api_key is not None:
+    wandb_config.api_key = args.wandb_api_key
+
+  return ParsedConfig(train=config, wandb=wandb_config)
