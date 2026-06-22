@@ -64,11 +64,11 @@ def tiny_byte_tokenizer() -> TinyByteTokenizer:
   return TinyByteTokenizer()
 
 
-def tiny_train_model(tokenizer, n_positions: int = 256, device=None):
+def tiny_train_model(tokenizer, n_positions: int = 1024, device=None):
   torch.manual_seed(0)
   vocab_size = len(tokenizer)
-  pad_token_id = tokenizer.pad_token_id
   eos_token_id = tokenizer.eos_token_id
+  pad_token_id = tokenizer.pad_token_id
 
   config = GPT2Config(
     vocab_size=vocab_size,

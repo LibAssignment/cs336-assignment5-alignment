@@ -8,9 +8,9 @@ from typing import Iterable, TypeVar
 
 import torch
 
-from cs336_alignment.rl.fixtures import extract_gsm8k_answer, gsm8k_reward_fn, make_rollouts
 from cs336_alignment.rl.grpo import grpo_train_step
 from cs336_alignment.rl.models import tiny_byte_tokenizer, tiny_train_model
+from cs336_alignment.rl.prompts import PROMPT_KINDS, extract_gsm8k_answer, get_prompt, make_prompt_rollouts
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -45,6 +45,7 @@ def load_gsm8k_examples(path: Path, limit: int) -> list[dict[str, str]]:
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="Local smoke test for grpo_train_step on GSM8K.")
   parser.add_argument("--data-path", type=Path, default=Path("data/gsm8k/train.jsonl"))
+  parser.add_argument("--prompt", choices=PROMPT_KINDS, default="question_only")
   parser.add_argument("--num-prompts", type=int, default=2)
   parser.add_argument("--group-size", type=int, default=2)
   parser.add_argument("--steps", type=int, default=1)
@@ -65,7 +66,8 @@ def main() -> None:
   torch.manual_seed(0)
   logger.info("Starting local GRPO smoke test")
   logger.info(
-    "Config: num_prompts=%d group_size=%d rollout_batch=%d steps=%d lr=%g grad_accum=%d",
+    "Config: prompt=%s num_prompts=%d group_size=%d rollout_batch=%d steps=%d lr=%g grad_accum=%d",
+    args.prompt,
     args.num_prompts,
     args.group_size,
     args.num_prompts * args.group_size,
@@ -76,12 +78,15 @@ def main() -> None:
 
   examples = load_gsm8k_examples(args.data_path, args.num_prompts)
   logger.info("Building rollout batch with group_size=%d", args.group_size)
-  prompts, outputs, ground_truths = make_rollouts(examples, args.group_size)
+  prompt = get_prompt(args.prompt)
+  prompts, outputs, ground_truths = make_prompt_rollouts(prompt, examples, args.group_size)
   logger.info(
-    "Built rollout batch: prompts=%d outputs=%d ground_truths=%d",
+    "Built rollout batch: prompt=%s prompts=%d outputs=%d ground_truths=%d reward_fn=%s",
+    args.prompt,
     len(prompts),
     len(outputs),
     len(ground_truths),
+    prompt.reward_fn.__name__,
   )
   logger.info("Creating byte-level tokenizer with 256 byte tokens + 2 specials")
   tokenizer = tiny_byte_tokenizer()
@@ -104,7 +109,7 @@ def main() -> None:
       model=model,
       tokenizer=tokenizer,
       optimizer=optimizer,
-      reward_fn=gsm8k_reward_fn,
+      reward_fn=prompt.reward_fn,
       prompt_strs=prompts,
       output_strs=outputs,
       ground_truths=ground_truths,
