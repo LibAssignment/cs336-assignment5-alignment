@@ -62,6 +62,7 @@ class RemoteConfig:
   remote_dir: str
   control_path: str
   control_persist: str
+  port: int | None = None
   dry_run: bool = False
   verbosity: int = 0
   quiet: bool = False
@@ -77,6 +78,15 @@ class RemoteConfig:
   @property
   def show_commands(self) -> bool:
     return self.verbosity > 0 or self.dry_run
+
+
+def parse_host_port(value: str) -> tuple[str, int | None]:
+  host, separator, maybe_port = value.rpartition(":")
+  if not separator or not maybe_port.isdigit():
+    return value, None
+  if not host or host.endswith("]"):
+    return value, None
+  return host, int(maybe_port)
 
 
 @dataclass(frozen=True)
@@ -124,6 +134,8 @@ def ssh_base(remote: RemoteConfig) -> list[str]:
     "-o",
     f"ControlPersist={remote.control_persist}",
   ]
+  if remote.port is not None:
+    cmd.extend(["-p", str(remote.port)])
   if remote.quiet:
     cmd.append("-q")
   elif remote.external_verbosity > 0:
@@ -151,6 +163,17 @@ def ssh_capture(remote: RemoteConfig, remote_command: str) -> str:
 
 def rsync_ssh(remote: RemoteConfig) -> str:
   return " ".join(shlex.quote(part) for part in ssh_base(remote))
+
+
+def rsync_base(remote: RemoteConfig) -> list[str]:
+  return [
+    "rsync",
+    "-az",
+    "--no-owner",
+    "--no-group",
+    "-e",
+    rsync_ssh(remote),
+  ]
 
 
 def should_include(path: Path) -> bool:
@@ -312,6 +335,8 @@ def uv_run_prefix(remote: RemoteConfig, setup: SetupConfig) -> str:
 
 def ssh_control_command(remote: RemoteConfig, operation: str) -> list[str]:
   cmd = ["ssh", "-S", remote.control_path, "-O", operation, remote.host]
+  if remote.port is not None:
+    cmd[1:1] = ["-p", str(remote.port)]
   if remote.quiet:
     cmd.insert(1, "-q")
   elif remote.external_verbosity > 0:
@@ -347,8 +372,10 @@ def open_master(remote: RemoteConfig) -> bool:
     "-o",
     f"ControlPersist={remote.control_persist}",
     "-fN",
-    remote.host,
   ]
+  if remote.port is not None:
+    cmd.extend(["-p", str(remote.port)])
+  cmd.append(remote.host)
   if remote.quiet:
     cmd.insert(1, "-q")
   elif remote.external_verbosity > 0:
@@ -473,10 +500,7 @@ def remote_synced_head(remote: RemoteConfig) -> str:
 def upload_file(remote: RemoteConfig, local_path: Path, remote_path: str) -> None:
   run(
     [
-      "rsync",
-      "-az",
-      "-e",
-      rsync_ssh(remote),
+      *rsync_base(remote),
       str(local_path),
       f"{remote.host}:{remote_path}",
     ],
@@ -696,11 +720,13 @@ def run_smoke(
 
 
 def remote_from_args(args: argparse.Namespace) -> RemoteConfig:
+  host, port = parse_host_port(args.host)
   return RemoteConfig(
-    host=args.host,
+    host=host,
     remote_dir=args.remote_dir,
     control_path=args.control_path,
     control_persist=args.control_persist,
+    port=port,
     dry_run=args.dry_run,
     verbosity=args.verbosity,
     quiet=args.quiet,
@@ -730,18 +756,12 @@ def download_results(remote: RemoteConfig, local_out: str) -> None:
   local_jobs.mkdir(parents=True, exist_ok=True)
   local_wandb.mkdir(parents=True, exist_ok=True)
   run([
-    "rsync",
-    "-az",
-    "-e",
-    rsync_ssh(remote),
+    *rsync_base(remote),
     f"{remote.host}:{remote_quote(remote.remote_dir.rstrip('/') + '/out/jobs/')}",
     f"{local_jobs}/",
   ], dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
   run([
-    "rsync",
-    "-az",
-    "-e",
-    rsync_ssh(remote),
+    *rsync_base(remote),
     f"{remote.host}:{remote_quote(remote.remote_dir.rstrip('/') + '/wandb/')}",
     f"{local_wandb}/",
   ], dry_run=remote.dry_run, quiet=remote.quiet, show_command=remote.show_commands)
