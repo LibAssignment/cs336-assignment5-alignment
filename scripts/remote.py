@@ -330,7 +330,7 @@ def uv_sync_prefix(remote: RemoteConfig, setup: SetupConfig) -> str:
 
 
 def uv_run_prefix(remote: RemoteConfig, setup: SetupConfig) -> str:
-  return shell_join(["uv", *verbosity_args(remote), "run", "--offline", *uv_extra_args(setup)])
+  return shell_join(["uv", *verbosity_args(remote), "run", *uv_extra_args(setup)]) # --offline?
 
 
 def ssh_control_command(remote: RemoteConfig, operation: str) -> list[str]:
@@ -497,6 +497,10 @@ def remote_synced_head(remote: RemoteConfig) -> str:
   )
 
 
+def remote_patch_digest(remote: RemoteConfig) -> str:
+  return ssh_capture(remote, f"cat {remote_meta_dir(remote)}/patch.sha256 2>/dev/null || true")
+
+
 def upload_file(remote: RemoteConfig, local_path: Path, remote_path: str) -> None:
   run(
     [
@@ -579,32 +583,36 @@ def remote_patch_apply_script(patch_digest: str) -> str:
   )
 
 
-def apply_patch_zip(remote: RemoteConfig) -> None:
-  patch_path, patch_digest, tmpdir = build_patch_zip(remote)
-  try:
-    meta = remote_meta_dir(remote)
-    upload_file(remote, patch_path, f"{meta}/patch.zip")
-    script = remote_patch_apply_script(patch_digest)
-    ssh(
-      remote,
-      (
-        f"cd {remote.quoted_remote_dir} && "
-        "python3 - <<PY\n"
-        f"{script}\n"
-        "PY"
-      ),
-    )
-  finally:
-    tmpdir.cleanup()
+def apply_patch_zip(remote: RemoteConfig, patch_path: Path, patch_digest: str) -> None:
+  meta = remote_meta_dir(remote)
+  upload_file(remote, patch_path, f"{meta}/patch.zip")
+  script = remote_patch_apply_script(patch_digest)
+  ssh(
+    remote,
+    (
+      f"cd {remote.quoted_remote_dir} && "
+      "python3 - <<PY\n"
+      f"{script}\n"
+      "PY"
+    ),
+  )
 
 
 def sync_code(remote: RemoteConfig) -> None:
   head = git_head()
   if remote.verbosity > 0 and not remote.quiet:
     print(f"local HEAD: {head}")
-  sync_bundle(remote, head)
-  checkout_synced_commit(remote, head)
-  apply_patch_zip(remote)
+  patch_path, patch_digest, tmpdir = build_patch_zip(remote)
+  try:
+    if remote_synced_head(remote) == head and remote_patch_digest(remote) == patch_digest:
+      if remote.verbosity > 0 and not remote.quiet:
+        print("remote workspace is current")
+      return
+    sync_bundle(remote, head)
+    checkout_synced_commit(remote, head)
+    apply_patch_zip(remote, patch_path, patch_digest)
+  finally:
+    tmpdir.cleanup()
 
 
 def setup_remote(remote: RemoteConfig, setup: SetupConfig) -> SetupConfig:
