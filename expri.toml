@@ -1,0 +1,48 @@
+[project]
+name = "cs336-assignment5-alignment"
+
+[sync]
+exclude_dirs = [
+  ".git",
+  ".venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".pyre",
+  ".hypothesis",
+  "alignment.egg-info",
+  "out",
+]
+
+exclude_files = [
+  ".env",
+  "*.pyc",
+  "*.pyo",
+  "*.log",
+  "*.tmp",
+  ".DS_Store",
+]
+
+include_ignored = [
+  "wandb/config.json",
+  "wandb/.gitignore",
+]
+
+[tasks]
+train = { command = ["python", "scripts/make.py", "train"], uv = true }
+smoke = { command = ["python", "scripts/make.py", "smoke"], uv = true }
+jobs = { command = ["python", "scripts/make.py", "jobs"], uv = true }
+
+[download.mappings]
+wandb = "wandb"
+jobs = "out/jobs"
+
+[[setup.steps]]
+kind = "uv"
+extras = ["gpu"]
+
+[[setup.steps]]
+kind = "hf"
+repo = "allenai/OLMo-2-0425-1B"
+revision = "a1847dff35000b4271fa70afc5db10fd29fedbdf"
