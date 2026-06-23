@@ -65,7 +65,7 @@ class VLLMServer:
         stop_server(self.process, timeout=self.shutdown_timeout)
 
     def init_weight_sync(self, policy_device: str):
-        self.weight_sync_group = init_weight_sync(self.base_url, policy_device)
+        self.weight_sync_group = init_weight_sync(self.base_url, policy_device, host=self.host)
         return self.weight_sync_group
 
     def sync_policy_weights(self, policy: torch.nn.Module) -> None:
@@ -127,7 +127,7 @@ def start_server(
     print(f"Starting vLLM server with model_id={model_id} on port {port} with GPU {gpu}")
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
-    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    # env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     env["VLLM_SERVER_DEV_MODE"] = "1"
     env["VLLM_LOGGING_LEVEL"] = logging_level
     command = [
@@ -138,6 +138,8 @@ def start_server(
         host,
         "--port",
         str(port),
+        "--device-ids",
+        str(gpu),
         "--dtype",
         "bfloat16",
         "--enable-prefix-caching",
@@ -222,13 +224,13 @@ def generate_completions(
     return completions
 
 
-def init_weight_sync(vllm_base_url: str, policy_device: str):
+def init_weight_sync(vllm_base_url: str, policy_device: str, host: str | None = None):
     from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
     from vllm.utils.network_utils import get_ip, get_open_port
 
     inference_world_size = _http_json("GET", f"{vllm_base_url}/get_world_size", timeout=10)["world_size"]
     world_size = inference_world_size + 1
-    master_address = get_ip()
+    master_address = host or get_ip()
     master_port = get_open_port()
     init_info = {
         "master_address": master_address,
@@ -237,6 +239,7 @@ def init_weight_sync(vllm_base_url: str, policy_device: str):
         "world_size": world_size,
     }
 
+    print("init_info:", init_info)
     torch.cuda.set_device(torch.device(policy_device))
     with ThreadPoolExecutor(max_workers=1) as executor:
         init_future = executor.submit(
@@ -246,6 +249,7 @@ def init_weight_sync(vllm_base_url: str, policy_device: str):
             {"init_info": init_info},
             60,
         )
+        time.sleep(1.0)
         weight_sync_group = NCCLWeightTransferEngine.trainer_init(
             {
                 "master_address": master_address,
@@ -275,6 +279,8 @@ def sync_policy_weights(policy: torch.nn.Module, vllm_base_url: str, weight_sync
 
     torch.cuda.set_device(next(policy.parameters()).device)
     _http_json("POST", f"{vllm_base_url}/pause", timeout=60)
+    _http_json("POST", f"{vllm_base_url}/start_weight_update",
+              {"is_checkpoint_format": True}, timeout=60)
     with ThreadPoolExecutor(max_workers=1) as executor:
         update_future = executor.submit(
             _http_json,
@@ -291,5 +297,6 @@ def sync_policy_weights(policy: torch.nn.Module, vllm_base_url: str, weight_sync
             ),
         )
         update_future.result()
+    _http_json("POST", f"{vllm_base_url}/finish_weight_update", timeout=60)
     _http_json("POST", f"{vllm_base_url}/reset_prefix_cache", timeout=60)
     _http_json("POST", f"{vllm_base_url}/resume", timeout=60)
