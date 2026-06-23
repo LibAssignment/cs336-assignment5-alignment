@@ -169,6 +169,7 @@ def rsync_base(remote: RemoteConfig) -> list[str]:
   return [
     "rsync",
     "-az",
+    "--progress",
     "--no-owner",
     "--no-group",
     "-e",
@@ -213,6 +214,23 @@ def git_head() -> str:
   return git_output(["rev-parse", "HEAD"])
 
 
+def git_remote_names() -> list[str]:
+  raw = git_output(["remote"])
+  return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def git_remote_url(remote_name: str) -> str | None:
+  try:
+    return git_output(["remote", "get-url", remote_name])
+  except subprocess.CalledProcessError:
+    return None
+
+
+def git_ref_commits(ref_prefix: str) -> list[str]:
+  raw = git_output(["for-each-ref", "--format=%(objectname)", ref_prefix])
+  return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
 def local_has_commit(commit: str) -> bool:
   return subprocess.run(
     ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
@@ -221,6 +239,52 @@ def local_has_commit(commit: str) -> bool:
     stderr=subprocess.DEVNULL,
     check=False,
   ).returncode == 0
+
+
+def nearest_local_base(head: str, commits: list[str]) -> str | None:
+  best_commit = None
+  best_distance = None
+  for commit in commits:
+    if not local_has_commit(commit):
+      continue
+    merge_base = subprocess.run(
+      ["git", "merge-base", head, commit],
+      cwd=REPO_ROOT,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.DEVNULL,
+      text=True,
+      check=False,
+    )
+    if merge_base.returncode != 0:
+      continue
+    base = merge_base.stdout.strip()
+    if not base or not local_has_commit(base):
+      continue
+    distance = int(git_output(["rev-list", "--count", f"{base}..{head}"]))
+    if best_distance is None or distance < best_distance:
+      best_commit = base
+      best_distance = distance
+  return best_commit
+
+
+def commit_distance(head: str, base: str) -> int:
+  return int(git_output(["rev-list", "--count", f"{base}..{head}"]))
+
+
+def git_remote_url_candidates(head: str) -> list[tuple[str, str]]:
+  candidates: list[tuple[int, str, str]] = []
+  fallback: list[tuple[str, str]] = []
+  for remote_name in git_remote_names():
+    url = git_remote_url(remote_name)
+    if url is None:
+      continue
+    fallback.append((remote_name, url))
+    base = nearest_local_base(head, git_ref_commits(f"refs/remotes/{remote_name}"))
+    if base is not None:
+      candidates.append((commit_distance(head, base), remote_name, url))
+  if candidates:
+    return [(remote_name, url) for _, remote_name, url in sorted(candidates)]
+  return fallback
 
 
 def build_source_bundle(remote: RemoteConfig, base_commit: str | None) -> tuple[Path, str, tempfile.TemporaryDirectory]:
@@ -497,6 +561,45 @@ def remote_synced_head(remote: RemoteConfig) -> str:
   )
 
 
+def remote_ref_commits(remote: RemoteConfig) -> list[str]:
+  raw = ssh_capture(
+    remote,
+    f"git --git-dir {remote_git_dir(remote)} for-each-ref --format='%(objectname)' 2>/dev/null || true",
+  )
+  return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def sync_bundle_from_remotes(remote: RemoteConfig, head: str, candidates: list[tuple[str, str]]) -> bool:
+  if not candidates:
+    return False
+  git_dir = remote_git_dir(remote)
+  tmp_git_dir = f"{git_dir}.clone-tmp"
+  qhead = shlex.quote(head)
+  remote_name, url = candidates[0]
+  qurl = shlex.quote(url)
+  command = (
+    f"if [ -d {git_dir} ]; then "
+    f"(git --git-dir {git_dir} remote get-url origin >/dev/null 2>&1 && "
+    f"git --git-dir {git_dir} remote set-url origin {qurl} || "
+    f"git --git-dir {git_dir} remote add origin {qurl}) && "
+    f"git --git-dir {git_dir} fetch --quiet origin "
+    "'+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' >/dev/null 2>&1; "
+    f"else rm -rf {tmp_git_dir} && git clone --mirror --quiet {qurl} {tmp_git_dir} >/dev/null 2>&1 && "
+    f"mv {tmp_git_dir} {git_dir}; fi && "
+    f"git --git-dir {git_dir} cat-file -e {qhead}^{{commit}} 2>/dev/null && "
+    f"git --git-dir {git_dir} update-ref refs/heads/synced {qhead} && "
+    f"echo yes || {{ rm -rf {tmp_git_dir}; true; }}"
+  )
+  result = ssh_capture(remote, command)
+  if result == "yes":
+    if remote.verbosity > 0 and not remote.quiet:
+      print(f"remote fetched commit from {remote_name}: {head}")
+    return True
+  if remote.verbosity > 0 and not remote.quiet:
+    print(f"remote {remote_name} fetch did not provide target commit; falling back to bundle")
+  return False
+
+
 def remote_patch_digest(remote: RemoteConfig) -> str:
   return ssh_capture(remote, f"cat {remote_meta_dir(remote)}/patch.sha256 2>/dev/null || true")
 
@@ -518,7 +621,6 @@ def sync_bundle(remote: RemoteConfig, head: str) -> None:
   meta = remote_meta_dir(remote)
   git_dir = remote_git_dir(remote)
   ssh(remote, f"mkdir -p {meta}")
-  ssh(remote, f"test -d {git_dir} || git init --bare {git_dir}")
 
   if remote_has_commit(remote, head):
     if remote.verbosity > 0 and not remote.quiet:
@@ -526,9 +628,20 @@ def sync_bundle(remote: RemoteConfig, head: str) -> None:
     ssh(remote, f"git --git-dir {git_dir} update-ref refs/heads/synced {shlex.quote(head)}")
     return
 
-  base_commit = remote_synced_head(remote)
-  if not base_commit or not local_has_commit(base_commit):
-    base_commit = None
+  if sync_bundle_from_remotes(remote, head, git_remote_url_candidates(head)):
+    return
+
+  ssh(remote, f"test -d {git_dir} || git init --bare {git_dir}")
+  if remote_has_commit(remote, head):
+    if remote.verbosity > 0 and not remote.quiet:
+      print(f"remote already has commit: {head}")
+    ssh(remote, f"git --git-dir {git_dir} update-ref refs/heads/synced {shlex.quote(head)}")
+    return
+
+  base_commit = nearest_local_base(head, remote_ref_commits(remote))
+  if base_commit is not None and remote.verbosity > 0 and not remote.quiet:
+    distance = git_output(["rev-list", "--count", f"{base_commit}..{head}"])
+    print(f"source bundle base: {base_commit} ({distance} commits behind HEAD)")
 
   bundle_path, bundle_digest, tmpdir = build_source_bundle(remote, base_commit)
   try:
