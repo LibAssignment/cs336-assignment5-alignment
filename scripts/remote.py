@@ -145,7 +145,7 @@ def ssh_base(remote: RemoteConfig) -> list[str]:
 
 def ssh(remote: RemoteConfig, remote_command: str) -> None:
   run(
-    [*ssh_base(remote), remote.host, remote_command],
+    [*ssh_base(remote), remote.host, "[ -f ~/.profile ] && source ~/.profile;" + remote_command],
     dry_run=remote.dry_run,
     quiet=remote.quiet,
     show_command=remote.show_commands,

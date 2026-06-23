@@ -49,9 +49,16 @@ torch = [
 torchvision = [
     { index = "pytorch-cu129", extra = "gpu", marker = "sys_platform == 'linux'" },
 ]
+vllm = [
+    { index = "vllm-cu129", extra = "gpu", marker = "sys_platform == 'linux'" },
+]
 [[tool.uv.index]]
 name = "pytorch-cu129"
 url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+[[tool.uv.index]]
+name = "vllm-cu129"
+url = "https://wheels.vllm.ai/0.23.0/cu129"
 explicit = true
 
 [tool.pytest.ini_options]
