@@ -5,13 +5,13 @@ from dataclasses import dataclass
 @dataclass
 class GRPOTrainStepResult:
   loss: torch.Tensor
-  log_probs: torch.Tensor
+  log_probs: torch.Tensor | None
   advantages: torch.Tensor
   rewards: torch.Tensor
 
   def metadata(self) -> dict[str, torch.Tensor]:
     return {
-      "log_probs": self.log_probs.detach(),
+      **({} if self.log_probs is None else {"log_probs": self.log_probs.detach()}),
       "advantages": self.advantages.detach(),
       "rewards": self.rewards.detach(),
     }
@@ -28,6 +28,7 @@ def grpo_train_step(
 
   gradient_accumulation_steps: int,
   max_grad_norm: float | None = None,
+  returns_log_probs: bool = False,
 
   # compute_group_normalized_rewards
   baseline: Literal["mean", "none"] = "mean",
@@ -91,8 +92,9 @@ def grpo_train_step(
     )
     loss.backward()
 
-    final_loss += loss * (x_batch.size(0) / len(prompt_strs))
-    final_log_probs.append(log_probs.log_probs.detach())
+    final_loss += loss.detach() * (x_batch.size(0) / len(prompt_strs)) # TODO: detach here to reduce GPU memory usage
+    if returns_log_probs:
+      final_log_probs.append(log_probs.log_probs.detach())
   if max_grad_norm is not None:
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
   optimizer.step()
@@ -100,7 +102,7 @@ def grpo_train_step(
 
   return GRPOTrainStepResult(
     loss=final_loss,
-    log_probs=torch.cat(final_log_probs, dim=0),
+    log_probs=torch.cat(final_log_probs, dim=0) if final_log_probs else None,
     advantages=advantages.advantages.detach(),
     rewards=rewards.raw_rewards.detach(),
   )

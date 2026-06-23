@@ -349,10 +349,11 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       "train/advantage/std": result.advantages.float().std(unbiased=False).item(),
       "train/rollout/batch_size": len(outputs),
       "train/rollout/prompt_count": len(batch_examples),
-      "train/rollout/log_prob_seq_len": result.log_probs.shape[1],
+      "train/rollout/log_prob_seq_len": result.log_probs.shape[1] if result.log_probs is not None else 0,
     }
     state.step_metrics(metrics, step=step)
     state.save_checkpoint(step + 1, model, optimizer)
+    del result
 
     if vllm is not None and config.device != "cpu":
       vllm.sync_policy_weights(model)
