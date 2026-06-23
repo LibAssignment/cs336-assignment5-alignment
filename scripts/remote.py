@@ -25,7 +25,7 @@ DEFAULT_UV_EXTRAS = ("plots",)
 OLMO2_1B_MODEL_ID = "allenai/OLMo-2-0425-1B"
 OLMO2_1B_REVISION = "a1847dff35000b4271fa70afc5db10fd29fedbdf"
 OLMO2_1B_CACHE_PATH = (
-  "$HOME/.cache/huggingface/hub/models--allenai--OLMo-2-0425-1B/"
+  "${HF_HOME:-$HOME/.cache/huggingface}/hub/models--allenai--OLMo-2-0425-1B/"
   f"snapshots/{OLMO2_1B_REVISION}"
 )
 

@@ -9,8 +9,13 @@ from typing import Any, NamedTuple
 
 from cs336_alignment.rl.prompts import PROMPT_KINDS
 
-DEFAULT_OLMO2_1B_PATH = Path(
-  "~/.cache/huggingface/hub/models--allenai--OLMo-2-0425-1B/snapshots/a1847dff35000b4271fa70afc5db10fd29fedbdf"
+DEFAULT_HF_HOME = Path(os.environ.get("HF_HOME", "~/.cache/huggingface"))
+DEFAULT_OLMO2_1B_PATH = (
+  DEFAULT_HF_HOME
+  / "hub"
+  / "models--allenai--OLMo-2-0425-1B"
+  / "snapshots"
+  / "a1847dff35000b4271fa70afc5db10fd29fedbdf"
 )
 
 

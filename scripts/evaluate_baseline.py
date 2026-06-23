@@ -16,7 +16,8 @@ prompts = load_prompts()
 
 # %%
 from cs336_alignment.vllm_utils import VLLMServer
-model_id = os.path.expanduser("~/.cache/huggingface/hub/models--allenai--OLMo-2-0425-1B/snapshots/a1847dff35000b4271fa70afc5db10fd29fedbdf")
+hf_home = Path(os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser()
+model_id = str(hf_home / "hub" / "models--allenai--OLMo-2-0425-1B" / "snapshots" / "a1847dff35000b4271fa70afc5db10fd29fedbdf")
 server = VLLMServer(model_id, gpu=0)
 server.start()
 
