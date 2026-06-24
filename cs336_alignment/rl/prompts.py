@@ -37,6 +37,22 @@ PROMPT_REWARD_FNS: dict[str, RewardFn] = {
 }
 
 
+def extract_r1_answer(response: str) -> str | None:
+  if "<answer>" not in response or "</answer>" not in response:
+    return None
+  answer = response.split("<answer>")[-1].split("</answer>", maxsplit=1)[0].strip()
+  if "\\boxed" in answer:
+    return extract_answer(answer)
+  return answer or None
+
+
+PROMPT_EXTRACT_FNS: dict[str, ExtractFn] = {
+  "question_only": extract_answer,
+  "r1_zero": extract_r1_answer,
+  "r1_zero_three_shot_gsm8k": extract_r1_answer,
+}
+
+
 def load_prompt_template(name: str) -> str:
   with open(PROMPTS_DIR / f"{name}.prompt") as f:
     return f.read()
@@ -47,7 +63,7 @@ def load_prompts() -> list[Prompt]:
     Prompt(
       name=name,
       template=load_prompt_template(name),
-      extract=extract_answer,
+      extract=PROMPT_EXTRACT_FNS[name],
       reward_fn=PROMPT_REWARD_FNS[name],
     )
     for name in PROMPT_KINDS
@@ -60,7 +76,7 @@ def get_prompt(name: str) -> Prompt:
   return Prompt(
     name=name,
     template=load_prompt_template(name),
-    extract=extract_answer,
+    extract=PROMPT_EXTRACT_FNS[name],
     reward_fn=PROMPT_REWARD_FNS[name],
   )
 

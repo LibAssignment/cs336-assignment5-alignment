@@ -23,6 +23,7 @@ from .prompts import (
   get_prompt,
   make_smoke_rollouts,
   make_vllm_rollouts,
+  ExtractFn,
 )
 
 
@@ -234,7 +235,15 @@ class TrainState:
     logger.info("Loaded checkpoint: %s next_step=%d", checkpoint, next_step)
     return next_step
 
-  def save_rollout_samples(self, stem: str, prompts: list[str], outputs: list[str], ground_truths: list[str], step: int) -> None:
+  def save_rollout_samples(
+    self,
+    stem: str,
+    prompts: list[str],
+    outputs: list[str],
+    ground_truths: list[str],
+    extract_answer: ExtractFn,
+    step: int,
+  ) -> None:
     if self.job is None or self.job_config is None or self.job_config.rollout_every <= 0:
       return None
     if step % self.job_config.rollout_every != 0 and step != self.config.num_rollout_steps:
@@ -243,7 +252,15 @@ class TrainState:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as f:
       for prompt, output, ground_truth in zip(prompts, outputs, ground_truths):
-        json.dump({"prompt": prompt, "output": output, "ground_truth": ground_truth}, f)
+        json.dump(
+          {
+            "prompt": prompt,
+            "output": output,
+            "answer": extract_answer(output),
+            "ground_truth": ground_truth,
+          },
+          f,
+        )
         f.write("\n")
     logger.info("Saved rollout samples: %s", path)
 
@@ -362,7 +379,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
         config.seed + step,
         config.rollout_microbatch_size(),
       )
-    state.save_rollout_samples("train", prompts, outputs, ground_truths, step)
+    state.save_rollout_samples("train", prompts, outputs, ground_truths, prompt.extract, step)
 
     logger.info(
       "Built rollout batch: step=%d prompt=%s prompts=%d outputs=%d ground_truths=%d reward_fn=%s",
@@ -458,6 +475,6 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
         for key, value in rewards.metadata.items():
           metrics[f"validate/{key}"] = value
       state.step_metrics(metrics, step=step)
-      state.save_rollout_samples("validate", prompts, outputs, ground_truths, step)
+      state.save_rollout_samples("validate", prompts, outputs, ground_truths, prompt.extract, step)
 
   state.finish()

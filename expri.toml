@@ -29,6 +29,10 @@ include_ignored = [
   "wandb/.gitignore",
 ]
 
+remote_managed = [
+  "uv.lock",
+]
+
 [tasks]
 train = { command = ["python", "scripts/make.py", "train"], uv = true }
 train-olmo2 = { command = [
