@@ -31,8 +31,17 @@ include_ignored = [
 
 [tasks]
 train = { command = ["python", "scripts/make.py", "train"], uv = true }
+train-olmo2 = { command = [
+  "python", "scripts/make.py", "train",
+  "--model", "olmo2-1B",
+  "--prompt", "r1_zero_three_shot_gsm8k",
+  "--device", "cuda:0",
+  "--inference", "vllm",
+  "--vllm-device", "cuda:1",
+], uv = true }
 smoke = { command = ["python", "scripts/make.py", "smoke"], uv = true }
 jobs = { command = ["python", "scripts/make.py", "jobs"], uv = true }
+tune = { command = ["python", "scripts/tune.py"], uv = true }
 
 [download.mappings]
 wandb = "wandb"

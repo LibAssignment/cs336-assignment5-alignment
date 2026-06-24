@@ -141,14 +141,15 @@ def cmd_jobs(args: argparse.Namespace) -> None:
   run(jobs_command(job_args), options)
 
 
-def add_common_args(parser: argparse.ArgumentParser) -> None:
-  parser.add_argument("--dry-run", action="store_true")
-  parser.add_argument("-v", dest="verbosity", action="count", default=0)
-  parser.add_argument("-q", "--quiet", action="store_true")
+def add_common_args(parser: argparse.ArgumentParser, *, suppress_defaults: bool = False) -> None:
+  default = argparse.SUPPRESS if suppress_defaults else None
+  parser.add_argument("--dry-run", action="store_true", default=default)
+  parser.add_argument("-v", dest="verbosity", action="count", default=argparse.SUPPRESS if suppress_defaults else 0)
+  parser.add_argument("-q", "--quiet", action="store_true", default=default)
 
 
 def add_train_passthrough(parser: argparse.ArgumentParser) -> None:
-  parser.add_argument("train_args", nargs=argparse.REMAINDER)
+  parser.set_defaults(train_args=[])
 
 
 def main() -> None:
@@ -159,11 +160,13 @@ def main() -> None:
   subparsers = parser.add_subparsers(dest="command", required=True)
 
   smoke_parser = subparsers.add_parser("smoke", help="run a short local smoke training pass")
+  add_common_args(smoke_parser, suppress_defaults=True)
   smoke_parser.add_argument("--smoke-group-size", type=int, default=2)
   add_train_passthrough(smoke_parser)
   smoke_parser.set_defaults(func=cmd_smoke)
 
   train_parser = subparsers.add_parser("train", help="run local training, optionally after smoke")
+  add_common_args(train_parser, suppress_defaults=True)
   smoke_group = train_parser.add_mutually_exclusive_group()
   smoke_group.add_argument("--smoke", dest="smoke", action="store_true", default=True)
   smoke_group.add_argument("--no-smoke", dest="smoke", action="store_false")
@@ -175,10 +178,18 @@ def main() -> None:
   train_parser.set_defaults(func=cmd_train)
 
   jobs_parser = subparsers.add_parser("jobs", help="run the local jobs inspector")
-  jobs_parser.add_argument("job_args", nargs=argparse.REMAINDER)
+  add_common_args(jobs_parser, suppress_defaults=True)
+  jobs_parser.set_defaults(job_args=[])
   jobs_parser.set_defaults(func=cmd_jobs)
 
-  args = parser.parse_args()
+  args, unknown_args = parser.parse_known_args()
+  if unknown_args:
+    if hasattr(args, "train_args"):
+      args.train_args = [*args.train_args, *unknown_args]
+    elif hasattr(args, "job_args"):
+      args.job_args = [*args.job_args, *unknown_args]
+    else:
+      parser.error(f"unrecognized arguments: {' '.join(unknown_args)}")
   args.func(args)
 
 

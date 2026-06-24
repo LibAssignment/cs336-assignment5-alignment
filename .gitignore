@@ -172,3 +172,4 @@ wandb/
 .vscode/
 .remote/
 expri.target.toml
+results/

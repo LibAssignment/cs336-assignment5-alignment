@@ -4,22 +4,34 @@ import argparse
 import gc
 import json
 import os
+import re
 import sys
 import time
+from contextlib import redirect_stdout
 from dataclasses import dataclass, asdict
 from pathlib import Path
+from typing import Any, TextIO
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-import torch
-from transformers import AutoModelForCausalLM
-
-from cs336_alignment.rl.config import DEFAULT_OLMO2_1B_PATH
-from cs336_alignment.rl.models import tiny_byte_tokenizer, tiny_train_model
-
-
 BYTES_PER_GIB = 1024**3
+DEFAULT_OUTPUT_PATH = Path("out/jobs/tune.txt")
+DEFAULT_JSON_PATH = Path("out/jobs/tune.json")
+
+
+class Tee:
+  def __init__(self, *files: TextIO) -> None:
+    self.files = files
+
+  def write(self, text: str) -> int:
+    for file in self.files:
+      file.write(text)
+    return len(text)
+
+  def flush(self) -> None:
+    for file in self.files:
+      file.flush()
 
 
 @dataclass
@@ -39,10 +51,29 @@ class TrialResult:
   error: str | None = None
 
 
+@dataclass(frozen=True)
+class TunePlotRow:
+  optimizer: str
+  batch_size: int
+  seq_len: int
+  status: str
+  cuda_peak_allocated_gib: float
+
+  @property
+  def batch_tokens(self) -> int:
+    return self.batch_size * self.seq_len
+
+
 def gib(num_bytes: int | float | None) -> float | None:
   if num_bytes is None:
     return None
   return num_bytes / BYTES_PER_GIB
+
+
+def parse_float(value: Any) -> float | None:
+  if value is None or value == "":
+    return None
+  return float(value)
 
 
 def parse_int_list(raw: str) -> list[int]:
@@ -112,9 +143,15 @@ def optimizer_for(name: str, model: torch.nn.Module, lr: float) -> torch.optim.O
 
 def load_model(args: argparse.Namespace, device: torch.device) -> tuple[torch.nn.Module, int]:
   if args.model == "tiny":
+    from cs336_alignment.rl.models import tiny_byte_tokenizer, tiny_train_model
+
     tokenizer = tiny_byte_tokenizer()
     model = tiny_train_model(tokenizer, n_positions=max(args.seq_lens), device=device)
     return model, len(tokenizer)
+
+  from transformers import AutoModelForCausalLM
+
+  from cs336_alignment.rl.config import DEFAULT_OLMO2_1B_PATH
 
   model_path = (args.model_path or DEFAULT_OLMO2_1B_PATH).expanduser()
   dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16 if args.dtype == "fp16" else torch.float32
@@ -254,7 +291,7 @@ def run_trial(
     torch.cuda.empty_cache()
 
 
-def print_table(results: list[TrialResult]) -> None:
+def print_table(results: list[TrialResult], *, show_errors: bool = False) -> None:
   header = (
     f"{'opt':<6} {'B':>4} {'S':>6} {'status':<6} {'sec':>7} "
     f"{'base_alloc':>11} {'peak_alloc':>11} {'peak_extra':>11} "
@@ -275,25 +312,131 @@ def print_table(results: list[TrialResult]) -> None:
       f"{base_alloc:>11} {peak_alloc:>11} {peak_extra:>11} "
       f"{peak_reserved:>13} {reserved_after:>14} {free_after:>11} {row.host_rss_after_gib:>10.2f}"
     )
-    if row.error:
+    if show_errors and row.error:
       print(f"  error: {row.error}")
 
 
-def main() -> None:
-  parser = argparse.ArgumentParser(description="Measure real forward/backward memory over batch-size and sequence-length grids.")
-  parser.add_argument("--model", choices=["tiny", "olmo2-1B"], default="olmo2-1B")
-  parser.add_argument("--model-path", type=Path, default=None)
-  parser.add_argument("--device", default="cuda:0")
-  parser.add_argument("--batch-sizes", type=parse_int_list, default=parse_int_list("1,2,4,8"))
-  parser.add_argument("--seq-lens", type=parse_int_list, default=parse_int_list("256,512,768,1024"))
-  parser.add_argument("--optimizers", type=lambda raw: [item.strip() for item in raw.split(",") if item.strip()], default=["adamw"])
-  parser.add_argument("--lr", type=float, default=1e-3)
-  parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
-  parser.add_argument("--flash-attention", action=argparse.BooleanOptionalAction, default=True)
-  parser.add_argument("--include-entropy", action="store_true", help="Also compute the full-vocab entropy term used by the current GRPO helper.")
-  parser.add_argument("--entropy-weight", type=float, default=0.0)
-  parser.add_argument("--json", type=Path, default=None, help="Optional path to write machine-readable results.")
-  args = parser.parse_args()
+def load_json_plot_rows(path: Path) -> list[TunePlotRow]:
+  payload = json.loads(path.read_text())
+  if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+    raise ValueError(f"{path} must contain an object with a results list")
+
+  rows = []
+  for item in payload["results"]:
+    if not isinstance(item, dict):
+      continue
+    peak_allocated = parse_float(item.get("cuda_peak_allocated_gib"))
+    if peak_allocated is None:
+      continue
+    rows.append(
+      TunePlotRow(
+        optimizer=str(item["optimizer"]),
+        batch_size=int(item["batch_size"]),
+        seq_len=int(item["seq_len"]),
+        status=str(item["status"]),
+        cuda_peak_allocated_gib=peak_allocated,
+      )
+    )
+  return rows
+
+
+def parse_text_plot_row(line: str) -> TunePlotRow | None:
+  match = re.match(r"^(\S+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$", line)
+  if match is None:
+    return None
+
+  optimizer, batch_size, seq_len, status, rest = match.groups()
+  if optimizer in {"opt", "Running", "Host", "CUDA:", "Model"}:
+    return None
+
+  values = rest.split()
+  if len(values) == 8:
+    peak_allocated_index = 2
+  elif len(values) == 7:
+    peak_allocated_index = 1
+  else:
+    return None
+
+  peak_allocated = parse_float(values[peak_allocated_index])
+  if peak_allocated is None:
+    return None
+  return TunePlotRow(
+    optimizer=optimizer,
+    batch_size=int(batch_size),
+    seq_len=int(seq_len),
+    status=status,
+    cuda_peak_allocated_gib=peak_allocated,
+  )
+
+
+def load_text_plot_rows(path: Path) -> list[TunePlotRow]:
+  rows = []
+  for line in path.read_text().splitlines():
+    row = parse_text_plot_row(line)
+    if row is not None:
+      rows.append(row)
+  return rows
+
+
+def dedupe_plot_rows(rows: list[TunePlotRow]) -> list[TunePlotRow]:
+  deduped = {}
+  for row in rows:
+    deduped[(row.optimizer, row.batch_size, row.seq_len)] = row
+  return list(deduped.values())
+
+
+def load_plot_rows(path: Path) -> list[TunePlotRow]:
+  if path.suffix == ".json":
+    return dedupe_plot_rows(load_json_plot_rows(path))
+  if path.suffix in {".txt", ".log", ".out"}:
+    return dedupe_plot_rows(load_text_plot_rows(path))
+
+  try:
+    return dedupe_plot_rows(load_json_plot_rows(path))
+  except (json.JSONDecodeError, ValueError, KeyError, TypeError):
+    return dedupe_plot_rows(load_text_plot_rows(path))
+
+
+def plot_memory(rows: list[TunePlotRow], path: Path) -> None:
+  if not rows:
+    raise SystemExit("no tune rows with peak memory values found")
+
+  import matplotlib
+
+  matplotlib.use("Agg")
+  import matplotlib.pyplot as plt
+
+  markers = {"ok": "o", "oom": "x", "error": "s"}
+  fig, ax = plt.subplots(figsize=(9, 5.5))
+  for optimizer in sorted({row.optimizer for row in rows}):
+    for status in ("ok", "oom", "error"):
+      group = [row for row in rows if row.optimizer == optimizer and row.status == status]
+      if not group:
+        continue
+      group.sort(key=lambda row: row.batch_tokens)
+      ax.plot(
+        [row.batch_tokens for row in group],
+        [row.cuda_peak_allocated_gib for row in group],
+        linestyle="-" if status == "ok" else "None",
+        marker=markers.get(status, "."),
+        label=f"{optimizer} {status}",
+      )
+
+  ax.set_xlabel("Batch tokens (B*S)")
+  ax.set_ylabel("CUDA peak allocated (GiB)")
+  ax.set_title("Tune Memory by Batch Tokens")
+  ax.grid(True, which="both", linestyle=":", linewidth=0.7)
+  ax.legend()
+  fig.tight_layout()
+  path.parent.mkdir(parents=True, exist_ok=True)
+  fig.savefig(path, dpi=160)
+  plt.close(fig)
+
+
+def run_tune(args: argparse.Namespace) -> None:
+  global torch
+
+  import torch
 
   if not torch.cuda.is_available() or not args.device.startswith("cuda"):
     raise SystemExit("scripts/tune.py measures CUDA memory and requires a CUDA device, e.g. --device cuda:0")
@@ -327,7 +470,7 @@ def main() -> None:
         print(f"Running optimizer={optimizer_name} batch_size={batch_size} seq_len={seq_len}", flush=True)
         result = run_trial(model, vocab_size, optimizer_name, batch_size, seq_len, device, args)
         results.append(result)
-        print_table([result])
+        print_table([result], show_errors=True)
 
   print()
   print_table(results)
@@ -343,6 +486,70 @@ def main() -> None:
     }
     args.json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"wrote {args.json}")
+
+
+def add_run_args(parser: argparse.ArgumentParser) -> None:
+  parser.add_argument("--model", choices=["tiny", "olmo2-1B"], default="olmo2-1B")
+  parser.add_argument("--model-path", type=Path, default=None)
+  parser.add_argument("--device", default="cuda:0")
+  parser.add_argument("--batch-sizes", type=parse_int_list, default=parse_int_list("1,2,4,8,16"))
+  parser.add_argument("--seq-lens", type=parse_int_list, default=parse_int_list("256,512,768,1024,2048,4096"))
+  parser.add_argument("--optimizers", type=lambda raw: [item.strip() for item in raw.split(",") if item.strip()], default=["adamw"])
+  parser.add_argument("--lr", type=float, default=1e-3)
+  parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
+  parser.add_argument("--flash-attention", action=argparse.BooleanOptionalAction, default=True)
+  parser.add_argument("--include-entropy", action="store_true", help="Also compute the full-vocab entropy term used by the current GRPO helper.")
+  parser.add_argument("--entropy-weight", type=float, default=0.0)
+  parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH, help="Path to write the human-readable tune output.")
+  parser.add_argument(
+    "--json",
+    type=Path,
+    nargs="?",
+    const=DEFAULT_JSON_PATH,
+    default=None,
+    help="Optional path to write machine-readable results. Defaults to out/jobs/tune.json when passed without a path.",
+  )
+
+
+def default_plot_input_path() -> Path:
+  if DEFAULT_JSON_PATH.exists():
+    return DEFAULT_JSON_PATH
+  return DEFAULT_OUTPUT_PATH
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+  args.output.parent.mkdir(parents=True, exist_ok=True)
+  with args.output.open("w") as output_file:
+    with redirect_stdout(Tee(sys.stdout, output_file)):
+      run_tune(args)
+      print(f"wrote {args.output}")
+
+
+def cmd_plot(args: argparse.Namespace) -> None:
+  rows = load_plot_rows(args.input)
+  output_path = args.output or args.input.with_suffix(".png")
+  plot_memory(rows, output_path)
+  print(f"read {len(rows)} rows from {args.input}")
+  print(f"wrote {output_path}")
+
+
+def main() -> None:
+  parser = argparse.ArgumentParser(description="Measure or plot tune memory results.")
+  subparsers = parser.add_subparsers(dest="command")
+
+  run_parser = subparsers.add_parser("run", help="measure CUDA forward/backward memory")
+  add_run_args(run_parser)
+  run_parser.set_defaults(func=cmd_run)
+
+  plot_parser = subparsers.add_parser("plot", help="plot B*S versus peak memory from tune txt/json")
+  plot_parser.add_argument("input", nargs="?", type=Path, default=default_plot_input_path(), help="Input tune txt/json file.")
+  plot_parser.add_argument("--output", type=Path, default=None, help="Output plot path. Defaults to a .png sibling of the input.")
+  plot_parser.set_defaults(func=cmd_plot)
+
+  add_run_args(parser)
+  parser.set_defaults(func=cmd_run)
+  args = parser.parse_args()
+  args.func(args)
 
 
 if __name__ == "__main__":
