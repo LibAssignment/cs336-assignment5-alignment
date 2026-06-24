@@ -339,6 +339,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       group_size=config.group_size,
       gradient_accumulation_steps=config.gradient_accumulation_steps,
       max_grad_norm=config.max_grad_norm,
+      memory_estimate=config.memory_estimate,
     )
     metrics = {
       "train/loss": result.loss.item(),

@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from cs336_alignment.rl.memory import MemoryEstimate, default_memory_estimate_for_model
 from cs336_alignment.rl.prompts import PROMPT_KINDS
 
 DEFAULT_HF_HOME = Path(os.environ.get("HF_HOME", "~/.cache/huggingface"))
@@ -17,8 +18,6 @@ DEFAULT_OLMO2_1B_PATH = (
   / "snapshots"
   / "a1847dff35000b4271fa70afc5db10fd29fedbdf"
 )
-
-
 def parse_optimizer_params(raw_params: str) -> dict[str, Any]:
   try:
     params = json.loads(raw_params)
@@ -81,6 +80,7 @@ class TrainConfig:
   optimizer_params: dict[str, Any] = field(default_factory=dict)
   gradient_accumulation_steps: int = 32
   max_grad_norm: float = 1.0
+  memory_estimate: MemoryEstimate = field(default_factory=MemoryEstimate)
   log_level: str = "INFO"
 
   def to_dict(self) -> dict[str, Any]:
@@ -113,6 +113,23 @@ class TrainConfig:
       config_data["optimizer_params"] = {}
     if "betas" in config_data.get("optimizer_params", {}):
       config_data["optimizer_params"]["betas"] = tuple(config_data["optimizer_params"]["betas"])
+    memory_estimate = config_data.get("memory_estimate")
+    if isinstance(memory_estimate, dict):
+      if memory_estimate.get("utilization") is None:
+        memory_estimate = {**memory_estimate}
+        memory_estimate.pop("utilization", None)
+      config_data["memory_estimate"] = MemoryEstimate(**memory_estimate)
+    elif memory_estimate is None:
+      config_data["memory_estimate"] = MemoryEstimate()
+    legacy_memory_keys = {
+      "memory_per_layer_gib": "per_layer_gib",
+      "memory_head_gib": "head_gib",
+      "memory_params_gib": "params_gib",
+      "memory_utilization": "utilization",
+    }
+    for legacy_key, estimate_key in legacy_memory_keys.items():
+      if legacy_key in config_data:
+        setattr(config_data["memory_estimate"], estimate_key, config_data.pop(legacy_key))
     return cls(**config_data)
 
   def num_rollout_prompts(self) -> int:
@@ -129,6 +146,12 @@ class TrainConfig:
     if self.model == "olmo2-1B":
       return (self.model_path_override or DEFAULT_OLMO2_1B_PATH).expanduser()
     return None
+
+  def fill_default_memory_estimates(self) -> None:
+    default_estimate = default_memory_estimate_for_model(self.model)
+    if default_estimate is not None and self.memory_estimate.all_none():
+      default_estimate.utilization = self.memory_estimate.utilization
+      self.memory_estimate = default_estimate
 
   def to_json(self) -> str:
     return json.dumps(self.to_dict(), indent=2, sort_keys=True)
@@ -256,6 +279,10 @@ def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
   )
   parser.add_argument("--gradient-accumulation-steps", type=int, default=argparse.SUPPRESS)
   parser.add_argument("--max-grad-norm", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-per-layer-gib", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-head-gib", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-params-gib", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-utilization", type=float, default=argparse.SUPPRESS)
   parser.add_argument("--log-level", default=argparse.SUPPRESS, choices=["DEBUG", "INFO", "WARNING", "ERROR"])
   return parser
 
@@ -311,7 +338,21 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
       "validate_every",
     }:
       continue
+    if key == "memory_per_layer_gib":
+      config.memory_estimate.per_layer_gib = value
+      continue
+    if key == "memory_head_gib":
+      config.memory_estimate.head_gib = value
+      continue
+    if key == "memory_params_gib":
+      config.memory_estimate.params_gib = value
+      continue
+    if key == "memory_utilization":
+      config.memory_estimate.utilization = value
+      continue
     setattr(config, key, value)
+
+  config.fill_default_memory_estimates()
 
   if args.save_config is not None:
     config.save_json(args.save_config)
