@@ -46,6 +46,7 @@ tune = { command = ["python", "scripts/tune.py"], uv = true }
 [download.mappings]
 wandb = "wandb"
 jobs = "out/jobs"
+tune = "out/tune"
 
 [[setup.steps]]
 kind = "uv"
