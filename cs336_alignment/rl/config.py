@@ -75,7 +75,7 @@ class TrainConfig:
   num_rollout_steps: int = 200
   device: str = "cpu"
   optimizer: str = "adamw"
-  lr: float = 1e-3
+  lr: float = 1e-5
   weight_decay: float = 0.0
   optimizer_params: dict[str, Any] = field(default_factory=dict)
   max_grad_norm: float = 1.0

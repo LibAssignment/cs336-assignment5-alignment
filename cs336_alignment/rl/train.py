@@ -382,8 +382,6 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       memory_estimate=config.memory_estimate,
     )
     rollout_metrics = {
-      "rollout/batch_size": len(outputs),
-      "rollout/prompt_count": len(batch_examples),
       "rollout/seq_len": memory_result.seq_len,
       "rollout/macrobatch_size": memory_result.macrobatch_size,
       "rollout/macro_adam_gib": memory_result.macro_adam_gib,
@@ -405,14 +403,23 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       macrobatch_size=memory_result.macrobatch_size,
       max_grad_norm=config.max_grad_norm,
     )
+    reward_values = result.rewards.float()
+    advantage_values = result.advantages.float()
     metrics = {
       "train/loss": result.loss.item(),
-      "train/reward/mean": result.rewards.float().mean().item(),
-      "train/reward/min": result.rewards.float().min().item(),
-      "train/reward/max": result.rewards.float().max().item(),
-      "train/advantage/mean": result.advantages.float().mean().item(),
-      "train/advantage/std": result.advantages.float().std(unbiased=False).item(),
+      "train/reward/mean": reward_values.mean().item(),
+      "train/reward/min": reward_values.min().item(),
+      "train/reward/max": reward_values.max().item(),
+      "train/reward/std": reward_values.std(unbiased=False).item(),
+      "train/advantage/mean": advantage_values.mean().item(),
+      "train/advantage/min": advantage_values.min().item(),
+      "train/advantage/max": advantage_values.max().item(),
+      "train/advantage/std": advantage_values.std(unbiased=False).item(),
     }
+    if result.reward_metadata is not None:
+      for key, value in result.reward_metadata.items():
+        if key != "reward":
+          metrics[f"train/{key}"] = value
     state.step_metrics(metrics, step=step)
     state.save_checkpoint(step + 1, model, optimizer)
     del result

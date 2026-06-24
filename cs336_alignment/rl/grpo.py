@@ -9,6 +9,7 @@ class GRPOTrainStepResult:
   log_probs: torch.Tensor | None
   advantages: torch.Tensor
   rewards: torch.Tensor
+  reward_metadata: dict[str, float] | None = None
 
   def metadata(self) -> dict[str, torch.Tensor]:
     return {
@@ -107,4 +108,5 @@ def grpo_train_step(
     log_probs=torch.cat(final_log_probs, dim=0) if final_log_probs else None,
     advantages=advantages.advantages.detach().cpu(),
     rewards=rewards.raw_rewards.detach().cpu(),
+    reward_metadata=rewards.metadata,
   )

@@ -38,6 +38,7 @@ train-olmo2 = { command = [
   "--device", "cuda:0",
   "--inference", "vllm",
   "--vllm-device", "cuda:1",
+  "--rollout-every=1", "--validate-every=5",
 ], uv = true }
 profile-olmo2 = { command = [
   "python", "scripts/make.py", "profile",
@@ -51,6 +52,9 @@ smoke = { command = ["python", "scripts/make.py", "smoke"], uv = true }
 jobs = { command = ["python", "scripts/make.py", "jobs"], uv = true }
 make = { command = ["python", "scripts/make.py"], uv = true }
 tune = { command = ["python", "scripts/tune.py"], uv = true }
+
+[download]
+ignore = ["*.pt"]
 
 [download.mappings]
 wandb = "wandb"
