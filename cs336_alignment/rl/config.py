@@ -121,15 +121,6 @@ class TrainConfig:
       config_data["memory_estimate"] = MemoryEstimate(**memory_estimate)
     elif memory_estimate is None:
       config_data["memory_estimate"] = MemoryEstimate()
-    legacy_memory_keys = {
-      "memory_per_layer_gib": "per_layer_gib",
-      "memory_head_gib": "head_gib",
-      "memory_params_gib": "params_gib",
-      "memory_utilization": "utilization",
-    }
-    for legacy_key, estimate_key in legacy_memory_keys.items():
-      if legacy_key in config_data:
-        setattr(config_data["memory_estimate"], estimate_key, config_data.pop(legacy_key))
     return cls(**config_data)
 
   def num_rollout_prompts(self) -> int:
@@ -150,6 +141,11 @@ class TrainConfig:
   def fill_default_memory_estimates(self) -> None:
     default_estimate = default_memory_estimate_for_model(self.model)
     if default_estimate is not None and self.memory_estimate.all_none():
+      default_estimate.adam_scale = self.memory_estimate.adam_scale
+      default_estimate.lm_head_scale = self.memory_estimate.lm_head_scale
+      default_estimate.result_scale = self.memory_estimate.result_scale
+      if self.memory_estimate.tokens is not None:
+        default_estimate.tokens = self.memory_estimate.tokens
       default_estimate.utilization = self.memory_estimate.utilization
       self.memory_estimate = default_estimate
 
@@ -219,7 +215,7 @@ class JobConfig:
   checkpoint_every: int = 100
   rollout_every: int = 40
   validate_every: int = 40
-  memory_profile: bool = False
+  profile_memory: bool = False
 
   def to_dict(self) -> dict[str, Any]:
     return {
@@ -231,7 +227,7 @@ class JobConfig:
       "checkpoint_every": self.checkpoint_every,
       "rollout_every": self.rollout_every,
       "validate_every": self.validate_every,
-      "memory_profile": self.memory_profile,
+      "profile_memory": self.profile_memory,
     }
 
 
@@ -280,9 +276,13 @@ def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     help='Extra optimizer kwargs as JSON, e.g. \'{"betas":[0.9,0.95]}\' for AdamW.',
   )
   parser.add_argument("--max-grad-norm", type=float, default=argparse.SUPPRESS)
-  parser.add_argument("--memory-per-layer-gib", type=float, default=argparse.SUPPRESS)
-  parser.add_argument("--memory-head-gib", type=float, default=argparse.SUPPRESS)
-  parser.add_argument("--memory-params-gib", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-model-gib", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-adam-scale", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-layer-act-gib", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-logits-gib", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-lm-head-scale", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-result-scale", type=float, default=argparse.SUPPRESS)
+  parser.add_argument("--memory-tokens", type=int, default=argparse.SUPPRESS)
   parser.add_argument("--memory-utilization", type=float, default=argparse.SUPPRESS)
   parser.add_argument("--log-level", default=argparse.SUPPRESS, choices=["DEBUG", "INFO", "WARNING", "ERROR"])
   return parser
@@ -308,7 +308,7 @@ def add_job_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
   parser.add_argument("--checkpoint-every", type=int, default=100)
   parser.add_argument("--rollout-every", type=int, default=40)
   parser.add_argument("--validate-every", type=int, default=40)
-  parser.add_argument("--memory-profile", action="store_true")
+  parser.add_argument("--profile-memory", action="store_true")
   return parser
 
 
@@ -338,20 +338,11 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
       "checkpoint_every",
       "rollout_every",
       "validate_every",
-      "memory_profile",
+      "profile_memory",
     }:
       continue
-    if key == "memory_per_layer_gib":
-      config.memory_estimate.per_layer_gib = value
-      continue
-    if key == "memory_head_gib":
-      config.memory_estimate.head_gib = value
-      continue
-    if key == "memory_params_gib":
-      config.memory_estimate.params_gib = value
-      continue
-    if key == "memory_utilization":
-      config.memory_estimate.utilization = value
+    if key.startswith("memory_"):
+      setattr(config.memory_estimate, key.removeprefix("memory_"), value)
       continue
     setattr(config, key, value)
 
@@ -381,7 +372,7 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
     checkpoint_every=args.checkpoint_every,
     rollout_every=args.rollout_every,
     validate_every=args.validate_every,
-    memory_profile=args.memory_profile,
+    profile_memory=args.profile_memory,
   )
 
   return ParsedConfig(train=config, wandb=wandb_config, job=job_config)

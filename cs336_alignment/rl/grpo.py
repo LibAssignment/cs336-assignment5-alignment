@@ -12,9 +12,9 @@ class GRPOTrainStepResult:
 
   def metadata(self) -> dict[str, torch.Tensor]:
     return {
-      **({} if self.log_probs is None else {"log_probs": self.log_probs.detach()}),
-      "advantages": self.advantages.detach(),
-      "rewards": self.rewards.detach(),
+      **({} if self.log_probs is None else {"log_probs": self.log_probs.detach().cpu()}),
+      "advantages": self.advantages.detach().cpu(),
+      "rewards": self.rewards.detach().cpu(),
     }
 
 def grpo_train_step(
@@ -96,7 +96,7 @@ def grpo_train_step(
 
     final_loss += loss.detach() * (x_batch.size(0) / len(prompt_strs)) # TODO: detach here to reduce GPU memory usage
     if returns_log_probs:
-      final_log_probs.append(log_probs.log_probs.detach())
+      final_log_probs.append(log_probs.log_probs.detach().cpu())
   if max_grad_norm is not None:
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
   optimizer.step()
@@ -105,6 +105,6 @@ def grpo_train_step(
   return GRPOTrainStepResult(
     loss=final_loss,
     log_probs=torch.cat(final_log_probs, dim=0) if final_log_probs else None,
-    advantages=advantages.advantages.detach(),
-    rewards=rewards.raw_rewards.detach(),
+    advantages=advantages.advantages.detach().cpu(),
+    rewards=rewards.raw_rewards.detach().cpu(),
   )

@@ -145,13 +145,13 @@ class TrainState:
     return self.job.path / "profiles" / "memory.pickle"
 
   def start_memory_profile(self) -> None:
-    if self.job_config is None or not self.job_config.memory_profile:
+    if self.job_config is None or not self.job_config.profile_memory:
       return
     if self.job is None:
-      logger.warning("--memory-profile requires an enabled job; skipping memory profile")
+      logger.warning("--profile-memory requires an enabled job; skipping memory profile")
       return
     if not torch.cuda.is_available():
-      logger.warning("--memory-profile requested but CUDA is not available; skipping memory profile")
+      logger.warning("--profile-memory requested but CUDA is not available; skipping memory profile")
       return
     record = torch.cuda.memory._record_memory_history
     try:
@@ -386,7 +386,9 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       "rollout/prompt_count": len(batch_examples),
       "rollout/seq_len": memory_result.seq_len,
       "rollout/macrobatch_size": memory_result.macrobatch_size,
+      "rollout/macro_adam_gib": memory_result.macro_adam_gib,
       "rollout/macro_act_gib": memory_result.macro_act_gib,
+      "rollout/macro_var_gib": memory_result.macro_var_gib,
       "rollout/macro_total_gib": memory_result.macro_total_gib,
     }
     state.step_metrics(rollout_metrics, step=step)

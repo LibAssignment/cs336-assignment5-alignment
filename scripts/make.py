@@ -156,11 +156,14 @@ def cmd_profile(args: argparse.Namespace) -> None:
   job_mode, train_args = extract_job_mode(train_args, None)
   if job_mode == "no-job":
     raise SystemExit("profile requires jobs; omit --no-job")
-  job_mode = "job"
+  if job_mode == "job":
+    raise SystemExit("profile runs in the foreground; omit --job")
   options = RunOptions(dry_run=args.dry_run, verbosity=args.verbosity, quiet=args.quiet)
-  train_args = with_flag(train_args, "--memory-profile")
+  train_args = with_flag(train_args, "--profile-memory")
   train_args = with_default_option(train_args, {"--num-rollout-steps", "--steps"}, "--num-rollout-steps", "5")
-  run(train_command(train_args_with_job_mode(train_args, job_mode)), options)
+  train_args = without_options_with_values(train_args, {"--wandb-mode"})
+  train_args = ["--wandb-mode", "disabled", *train_args]
+  run(train_command(train_args), options)
 
 
 def cmd_jobs(args: argparse.Namespace) -> None:
