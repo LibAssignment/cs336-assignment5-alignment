@@ -15,6 +15,7 @@ from .utils import compute_rollout_rewards
 
 from .models import build_model_and_tokenizer, model_context_length
 from .grpo import grpo_train_step
+from .memory import estimate_rollout_memory
 from .config import JobConfig, TrainConfig, WandbConfig
 from .jobs import Job, checkpoint_dir, clear_pid, latest_checkpoint, prepare_job, write_json, write_latest, write_pid, write_status
 from .prompts import (
@@ -245,10 +246,9 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
   rollout_prompt_count = config.num_rollout_prompts()
   prompt = get_prompt(config.prompt)
   logger.info(
-    "Rollout setup: rollout_batch_size=%d rollout_prompts=%d grad_accum=%d",
+    "Rollout setup: rollout_batch_size=%d rollout_prompts=%d",
     config.rollout_batch_size,
     rollout_prompt_count,
-    config.gradient_accumulation_steps,
   )
   logger.info("Creating model=%s on %s", config.model, device)
   model, tokenizer = build_model_and_tokenizer(config, device)
@@ -328,6 +328,23 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       prompt.reward_fn.__name__,
     )
 
+    memory_result = estimate_rollout_memory(
+      model=model,
+      tokenizer=tokenizer,
+      prompt_strs=prompts,
+      output_strs=outputs,
+      memory_estimate=config.memory_estimate,
+    )
+    rollout_metrics = {
+      "rollout/batch_size": len(outputs),
+      "rollout/prompt_count": len(batch_examples),
+      "rollout/seq_len": memory_result.seq_len,
+      "rollout/macrobatch_size": memory_result.macrobatch_size,
+      "rollout/macro_act_gib": memory_result.macro_act_gib,
+      "rollout/macro_total_gib": memory_result.macro_total_gib,
+    }
+    state.step_metrics(rollout_metrics, step=step)
+
     result = grpo_train_step(
       model=model,
       tokenizer=tokenizer,
@@ -337,9 +354,8 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       output_strs=outputs,
       ground_truths=ground_truths,
       group_size=config.group_size,
-      gradient_accumulation_steps=config.gradient_accumulation_steps,
+      macrobatch_size=memory_result.macrobatch_size,
       max_grad_norm=config.max_grad_norm,
-      memory_estimate=config.memory_estimate,
     )
     metrics = {
       "train/loss": result.loss.item(),
@@ -348,9 +364,6 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       "train/reward/max": result.rewards.float().max().item(),
       "train/advantage/mean": result.advantages.float().mean().item(),
       "train/advantage/std": result.advantages.float().std(unbiased=False).item(),
-      "train/rollout/batch_size": len(outputs),
-      "train/rollout/prompt_count": len(batch_examples),
-      "train/rollout/log_prob_seq_len": result.log_probs.shape[1] if result.log_probs is not None else 0,
     }
     state.step_metrics(metrics, step=step)
     state.save_checkpoint(step + 1, model, optimizer)

@@ -2,7 +2,6 @@ from .utils import *
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from dataclasses import dataclass
 
-from cs336_alignment.rl.memory import MemoryEstimate, trim_macrobatch_size_to_memory
 
 @dataclass
 class GRPOTrainStepResult:
@@ -28,7 +27,7 @@ def grpo_train_step(
   ground_truths: list[str],
   group_size: int,
 
-  gradient_accumulation_steps: int,
+  macrobatch_size: int,
   max_grad_norm: float | None = None,
   returns_log_probs: bool = False,
 
@@ -45,10 +44,10 @@ def grpo_train_step(
   # aggregate_loss_across_microbatch
   loss_normalization: Literal["sequence", "constant"] = "sequence",
   normalization_constant: int | None = None,
-
-  # memory helper, in GiB for the requested macrobatch
-  memory_estimate: MemoryEstimate | None = None,
 ):
+  if macrobatch_size <= 0:
+    raise ValueError(f"macrobatch_size must be positive, got {macrobatch_size}")
+
   device = model.device
   tokenized = tokenize_prompt_and_output(
     prompt_strs,
@@ -68,14 +67,6 @@ def grpo_train_step(
     baseline=baseline,
     advantage_eps=advantage_eps,
     advantage_normalizer=advantage_normalizer,
-  )
-
-  macrobatch_size = (len(prompt_strs) - 1) // gradient_accumulation_steps + 1
-  macrobatch_size = trim_macrobatch_size_to_memory(
-    model,
-    macrobatch_size,
-    seq_len=x.shape[1],
-    memory_estimate=memory_estimate,
   )
 
   final_loss = torch.tensor(0.0, device=device)

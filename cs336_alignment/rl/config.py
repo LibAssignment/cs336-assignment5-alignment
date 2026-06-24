@@ -78,7 +78,6 @@ class TrainConfig:
   lr: float = 1e-3
   weight_decay: float = 0.0
   optimizer_params: dict[str, Any] = field(default_factory=dict)
-  gradient_accumulation_steps: int = 32
   max_grad_norm: float = 1.0
   memory_estimate: MemoryEstimate = field(default_factory=MemoryEstimate)
   log_level: str = "INFO"
@@ -99,6 +98,7 @@ class TrainConfig:
       config_data["sampling_max_tokens"] = config_data.pop("max_tokens")
     if "steps" in config_data:
       config_data["num_rollout_steps"] = config_data.pop("steps")
+    config_data.pop("gradient_accumulation_steps", None)
     if "data_path" in config_data:
       config_data["data_path"] = Path(config_data["data_path"])
     if "model_path" in config_data and config_data["model_path"] is not None:
@@ -277,7 +277,6 @@ def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     default=argparse.SUPPRESS,
     help='Extra optimizer kwargs as JSON, e.g. \'{"betas":[0.9,0.95]}\' for AdamW.',
   )
-  parser.add_argument("--gradient-accumulation-steps", type=int, default=argparse.SUPPRESS)
   parser.add_argument("--max-grad-norm", type=float, default=argparse.SUPPRESS)
   parser.add_argument("--memory-per-layer-gib", type=float, default=argparse.SUPPRESS)
   parser.add_argument("--memory-head-gib", type=float, default=argparse.SUPPRESS)

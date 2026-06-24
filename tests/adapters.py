@@ -331,6 +331,7 @@ def run_grpo_train_step(
                 before clipping, and any other statistics you might want to log.
     """
     from cs336_alignment.rl.grpo import grpo_train_step
+    macrobatch_size = (len(repeated_prompts) - 1) // gradient_accumulation_steps + 1
     result = grpo_train_step(
         model,
         tokenizer,
@@ -339,7 +340,7 @@ def run_grpo_train_step(
         repeated_prompts,
         rollout_responses,
         repeated_ground_truths,
-        gradient_accumulation_steps=gradient_accumulation_steps,
+        macrobatch_size=macrobatch_size,
         max_grad_norm=max_grad_norm,
         group_size=group_size,
         baseline=baseline,
