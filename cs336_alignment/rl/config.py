@@ -219,6 +219,7 @@ class JobConfig:
   checkpoint_every: int = 100
   rollout_every: int = 40
   validate_every: int = 40
+  memory_profile: bool = False
 
   def to_dict(self) -> dict[str, Any]:
     return {
@@ -230,6 +231,7 @@ class JobConfig:
       "checkpoint_every": self.checkpoint_every,
       "rollout_every": self.rollout_every,
       "validate_every": self.validate_every,
+      "memory_profile": self.memory_profile,
     }
 
 
@@ -306,6 +308,7 @@ def add_job_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
   parser.add_argument("--checkpoint-every", type=int, default=100)
   parser.add_argument("--rollout-every", type=int, default=40)
   parser.add_argument("--validate-every", type=int, default=40)
+  parser.add_argument("--memory-profile", action="store_true")
   return parser
 
 
@@ -335,6 +338,7 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
       "checkpoint_every",
       "rollout_every",
       "validate_every",
+      "memory_profile",
     }:
       continue
     if key == "memory_per_layer_gib":
@@ -377,6 +381,7 @@ def parse_train_config(argv: list[str] | None = None) -> ParsedConfig:
     checkpoint_every=args.checkpoint_every,
     rollout_every=args.rollout_every,
     validate_every=args.validate_every,
+    memory_profile=args.memory_profile,
   )
 
   return ParsedConfig(train=config, wandb=wandb_config, job=job_config)

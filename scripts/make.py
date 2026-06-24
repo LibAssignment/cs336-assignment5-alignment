@@ -120,6 +120,22 @@ def train_args_with_job_mode(train_args: list[str], job_mode: str | None) -> lis
   return train_args
 
 
+def with_flag(train_args: list[str], flag: str) -> list[str]:
+  if flag in train_args:
+    return train_args
+  return [flag, *train_args]
+
+
+def has_option(train_args: list[str], options: set[str]) -> bool:
+  return any(arg in options or any(arg.startswith(f"{option}=") for option in options) for arg in train_args)
+
+
+def with_default_option(train_args: list[str], options: set[str], option: str, value: str) -> list[str]:
+  if has_option(train_args, options):
+    return train_args
+  return [option, value, *train_args]
+
+
 def cmd_smoke(args: argparse.Namespace) -> None:
   train_args = passthrough_args(args.train_args)
   options = RunOptions(dry_run=args.dry_run, verbosity=args.verbosity, quiet=args.quiet)
@@ -132,6 +148,18 @@ def cmd_train(args: argparse.Namespace) -> None:
   options = RunOptions(dry_run=args.dry_run, verbosity=args.verbosity, quiet=args.quiet)
   if args.smoke:
     run(train_command(smoke_train_args(train_args, args.smoke_group_size)), options)
+  run(train_command(train_args_with_job_mode(train_args, job_mode)), options)
+
+
+def cmd_profile(args: argparse.Namespace) -> None:
+  train_args = passthrough_args(args.train_args)
+  job_mode, train_args = extract_job_mode(train_args, None)
+  if job_mode == "no-job":
+    raise SystemExit("profile requires jobs; omit --no-job")
+  job_mode = "job"
+  options = RunOptions(dry_run=args.dry_run, verbosity=args.verbosity, quiet=args.quiet)
+  train_args = with_flag(train_args, "--memory-profile")
+  train_args = with_default_option(train_args, {"--num-rollout-steps", "--steps"}, "--num-rollout-steps", "5")
   run(train_command(train_args_with_job_mode(train_args, job_mode)), options)
 
 
@@ -176,6 +204,11 @@ def main() -> None:
   job_group.add_argument("--no-job", dest="job_mode", action="store_const", const="no-job")
   add_train_passthrough(train_parser)
   train_parser.set_defaults(func=cmd_train)
+
+  profile_parser = subparsers.add_parser("profile", help="run local training with CUDA memory profiling enabled")
+  add_common_args(profile_parser, suppress_defaults=True)
+  add_train_passthrough(profile_parser)
+  profile_parser.set_defaults(func=cmd_profile)
 
   jobs_parser = subparsers.add_parser("jobs", help="run the local jobs inspector")
   add_common_args(jobs_parser, suppress_defaults=True)

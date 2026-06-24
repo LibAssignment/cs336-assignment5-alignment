@@ -12,6 +12,7 @@ from cs336_alignment.rl.utils import tokenize_prompt_and_output
 DEFAULT_OLMO2_1B_MEMORY_PER_LAYER_GIB = 1.19
 DEFAULT_OLMO2_1B_MEMORY_HEAD_GIB = 6.12
 DEFAULT_OLMO2_1B_MEMORY_PARAMS_GIB = 14.0
+DEFAULT_OLMO2_1B_MEMORY_TOKENS = 8 * 1024
 DEFAULT_MEMORY_UTILIZATION = 0.9
 
 
@@ -20,13 +21,22 @@ class MemoryEstimate:
   per_layer_gib: float | None = None
   head_gib: float | None = None
   params_gib: float | None = None
+  tokens: int | None = None
   utilization: float = DEFAULT_MEMORY_UTILIZATION
 
   def all_none(self) -> bool:
-    return self.per_layer_gib is None and self.head_gib is None and self.params_gib is None
+    return (
+      self.per_layer_gib is None
+      and self.head_gib is None
+      and self.params_gib is None
+    )
 
   def complete(self) -> bool:
-    return self.per_layer_gib is not None and self.head_gib is not None and self.params_gib is not None
+    return (
+      self.per_layer_gib is not None
+      and self.head_gib is not None
+      and self.params_gib is not None
+    )
 
   def valid(self) -> bool:
     return (
@@ -36,6 +46,7 @@ class MemoryEstimate:
       and self.per_layer_gib > 0
       and self.head_gib > 0
       and self.params_gib > 0
+      and (self.tokens is None or self.tokens > 0)
       and self.utilization > 0
       and self.utilization <= 1
     )
@@ -54,6 +65,7 @@ DEFAULT_OLMO2_1B_MEMORY_ESTIMATE = MemoryEstimate(
   per_layer_gib=DEFAULT_OLMO2_1B_MEMORY_PER_LAYER_GIB,
   head_gib=DEFAULT_OLMO2_1B_MEMORY_HEAD_GIB,
   params_gib=DEFAULT_OLMO2_1B_MEMORY_PARAMS_GIB,
+  tokens=DEFAULT_OLMO2_1B_MEMORY_TOKENS,
   utilization=DEFAULT_MEMORY_UTILIZATION,
 )
 
@@ -65,6 +77,7 @@ def default_memory_estimate_for_model(model: str) -> MemoryEstimate | None:
     per_layer_gib=DEFAULT_OLMO2_1B_MEMORY_ESTIMATE.per_layer_gib,
     head_gib=DEFAULT_OLMO2_1B_MEMORY_ESTIMATE.head_gib,
     params_gib=DEFAULT_OLMO2_1B_MEMORY_ESTIMATE.params_gib,
+    tokens=DEFAULT_OLMO2_1B_MEMORY_ESTIMATE.tokens,
     utilization=DEFAULT_OLMO2_1B_MEMORY_ESTIMATE.utilization,
   )
 
@@ -74,13 +87,20 @@ def model_layer_count(model: Any) -> int:
   return int(getattr(config, "num_hidden_layers", 0) or getattr(config, "n_layer", 0) or 0)
 
 
-def estimate_rollout_activation_memory_gib(model: Any, memory_estimate: MemoryEstimate | None) -> float | None:
+def estimate_activation_memory_gib(
+  model: Any,
+  memory_estimate: MemoryEstimate | None,
+  *,
+  tokens: int,
+) -> float | None:
   if memory_estimate is None or not memory_estimate.valid():
     return None
   num_layers = model_layer_count(model)
   if num_layers <= 0:
     return None
-  return num_layers * memory_estimate.per_layer_gib + memory_estimate.head_gib
+  reference_tokens = memory_estimate.tokens or tokens
+  token_scale = tokens / reference_tokens
+  return (num_layers * memory_estimate.per_layer_gib + memory_estimate.head_gib) * token_scale
 
 
 def estimate_rollout_memory(
@@ -99,16 +119,11 @@ def estimate_rollout_memory(
     seq_len=seq_len,
     memory_estimate=memory_estimate,
   )
-  rollout_act_gib = estimate_rollout_activation_memory_gib(model, memory_estimate)
+  macro_tokens = macrobatch_size * seq_len
   macro_act_gib = 0.0
   macro_total_gib = 0.0
-  if (
-    requested_macrobatch_size > 0
-    and rollout_act_gib is not None
-    and memory_estimate.params_gib is not None
-  ):
-    macrobatch_scale = macrobatch_size / requested_macrobatch_size
-    macro_act_gib = rollout_act_gib * macrobatch_scale
+  if memory_estimate.valid():
+    macro_act_gib = estimate_activation_memory_gib(model, memory_estimate, tokens=macro_tokens) or 0.0
     macro_total_gib = memory_estimate.params_gib + macro_act_gib
 
   return MemoryEstimateResult(
@@ -147,7 +162,11 @@ def trim_macrobatch_size_to_memory(
   _, total_bytes = torch.cuda.mem_get_info(device)
   total_gib = total_bytes / (1024**3)
   variable_budget_gib = total_gib * memory_estimate.utilization - memory_estimate.params_gib
-  requested_variable_gib = num_layers * memory_estimate.per_layer_gib + memory_estimate.head_gib
+  requested_variable_gib = estimate_activation_memory_gib(
+    model,
+    memory_estimate,
+    tokens=macrobatch_size * seq_len,
+  )
   if variable_budget_gib <= 0 or requested_variable_gib <= 0:
     return 1
 

@@ -74,6 +74,7 @@ class TrainState:
     self.job = prepare_job(job_config, config, wandb_config) if job_config is not None else None
     self.wandb_run = None
     self.completed = False
+    self.memory_profile_active = False
 
   def init(self) -> None:
     self.configure_logging()
@@ -85,6 +86,7 @@ class TrainState:
 
     logger.info("Starting local GRPO smoke test")
     logger.info("Config: %s", self.config.to_json())
+    self.start_memory_profile()
     self.wandb_run = self.init_wandb()
     self.save_wandb_run_name()
 
@@ -133,8 +135,51 @@ class TrainState:
 
   def mark_failed_on_exit(self) -> None:
     if self.job is not None and not self.completed:
+      self.stop_memory_profile(dump=True)
       clear_pid(self.job)
       write_status(self.job, "failed", exit_code=1)
+
+  def memory_profile_path(self) -> Path | None:
+    if self.job is None:
+      return None
+    return self.job.path / "profiles" / "memory.pickle"
+
+  def start_memory_profile(self) -> None:
+    if self.job_config is None or not self.job_config.memory_profile:
+      return
+    if self.job is None:
+      logger.warning("--memory-profile requires an enabled job; skipping memory profile")
+      return
+    if not torch.cuda.is_available():
+      logger.warning("--memory-profile requested but CUDA is not available; skipping memory profile")
+      return
+    record = torch.cuda.memory._record_memory_history
+    try:
+      record(enabled="all", context="all", stacks="all", max_entries=1_000_000)
+    except TypeError:
+      try:
+        record(enabled=True, max_entries=1_000_000)
+      except TypeError:
+        record(max_entries=1_000_000)
+    self.memory_profile_active = True
+    logger.info("Started CUDA memory profile")
+
+  def stop_memory_profile(self, *, dump: bool) -> None:
+    if not self.memory_profile_active:
+      return
+    path = self.memory_profile_path()
+    if dump and path is not None:
+      path.parent.mkdir(parents=True, exist_ok=True)
+      try:
+        torch.cuda.memory._dump_snapshot(str(path))
+        logger.info("Saved CUDA memory profile: %s", path)
+      except Exception:
+        logger.exception("Failed to save CUDA memory profile")
+    try:
+      torch.cuda.memory._record_memory_history(enabled=None)
+    except TypeError:
+      torch.cuda.memory._record_memory_history(False)
+    self.memory_profile_active = False
 
   def step_metrics(self, values: dict[str, float | int], step: int) -> None:
     if self.wandb_run is not None:
@@ -206,6 +251,7 @@ class TrainState:
     return progress(iterable, **kwargs)
 
   def finish(self) -> None:
+    self.stop_memory_profile(dump=True)
     if self.wandb_run is not None:
       self.wandb_run.finish()
     if self.job is not None:
