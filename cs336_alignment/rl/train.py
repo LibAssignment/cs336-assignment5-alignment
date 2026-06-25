@@ -307,7 +307,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
   examples = load_gsm8k_examples(config.data_path, config.n_train_examples)
   validate_examples = load_gsm8k_examples(config.data_path.with_stem("test"), config.n_val_examples)
   rollout_prompt_count = config.num_rollout_prompts()
-  prompt = get_prompt(config.prompt)
+  prompt = get_prompt(config.prompt, config.reward)
   logger.info(
     "Rollout setup: rollout_batch_size=%d rollout_prompts=%d",
     config.rollout_batch_size,

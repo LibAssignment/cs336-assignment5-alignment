@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Callable
+from typing import Callable, Literal
 
 from cs336_alignment.drgrpo_grader import extract_answer, question_only_reward_fn, r1_zero_reward_fn
 from ..vllm_utils import VLLMServer
@@ -9,6 +9,7 @@ from ..vllm_utils import VLLMServer
 
 RewardFn = Callable[[str, str], dict[str, float]]
 ExtractFn = Callable[[str], str | None]
+RewardMode = Literal["answer", "answer+format"]
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,23 @@ PROMPT_REWARD_FNS: dict[str, RewardFn] = {
 }
 
 
+def with_reward_mode(reward_fn: RewardFn, reward_mode: RewardMode) -> RewardFn:
+  if reward_mode == "answer":
+    return reward_fn
+  if reward_mode != "answer+format":
+    raise ValueError(f"Unknown reward mode: {reward_mode}")
+
+  def answer_plus_format_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
+    rewards = reward_fn(response, ground_truth)
+    return {
+      **rewards,
+      "reward": rewards["answer_reward"] + rewards["format_reward"],
+    }
+
+  answer_plus_format_reward_fn.__name__ = f"{reward_fn.__name__}_answer_plus_format"
+  return answer_plus_format_reward_fn
+
+
 def extract_r1_answer(response: str) -> str | None:
   if "<answer>" not in response or "</answer>" not in response:
     return None
@@ -58,26 +76,26 @@ def load_prompt_template(name: str) -> str:
     return f.read()
 
 
-def load_prompts() -> list[Prompt]:
+def load_prompts(reward_mode: RewardMode = "answer") -> list[Prompt]:
   return [
     Prompt(
       name=name,
       template=load_prompt_template(name),
       extract=PROMPT_EXTRACT_FNS[name],
-      reward_fn=PROMPT_REWARD_FNS[name],
+      reward_fn=with_reward_mode(PROMPT_REWARD_FNS[name], reward_mode),
     )
     for name in PROMPT_KINDS
   ]
 
 
-def get_prompt(name: str) -> Prompt:
+def get_prompt(name: str, reward_mode: RewardMode = "answer") -> Prompt:
   if name not in PROMPT_KINDS:
     raise ValueError(f"Unknown prompt kind: {name}")
   return Prompt(
     name=name,
     template=load_prompt_template(name),
     extract=PROMPT_EXTRACT_FNS[name],
-    reward_fn=PROMPT_REWARD_FNS[name],
+    reward_fn=with_reward_mode(PROMPT_REWARD_FNS[name], reward_mode),
   )
 
 

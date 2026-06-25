@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from cs336_alignment.rl.memory import MemoryEstimate, default_memory_estimate_for_model
-from cs336_alignment.rl.prompts import PROMPT_KINDS
+from cs336_alignment.rl.prompts import PROMPT_KINDS, RewardMode
 
 DEFAULT_HF_HOME = Path(os.environ.get("HF_HOME", "~/.cache/huggingface"))
 DEFAULT_OLMO2_1B_PATH = (
@@ -60,6 +60,7 @@ class TrainConfig:
   model: str = "tiny"
   model_path_override: Path | None = None
   prompt: str = "question_only"
+  reward: RewardMode = "answer"
   inference: str | None = None
   vllm_model: str = ""
   vllm_device: str = "cuda:0"
@@ -244,6 +245,7 @@ def add_train_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
   parser.add_argument("--model", choices=["tiny", "olmo2-1B"], default=argparse.SUPPRESS)
   parser.add_argument("--model-path", type=Path, dest="model_path_override", default=argparse.SUPPRESS)
   parser.add_argument("--prompt", choices=PROMPT_KINDS, default=argparse.SUPPRESS)
+  parser.add_argument("--reward", choices=["answer", "answer+format"], default=argparse.SUPPRESS)
   parser.add_argument("--inference", type=inference_base_url, default=argparse.SUPPRESS)
   parser.add_argument("--vllm-model", default=argparse.SUPPRESS)
   parser.add_argument("--vllm-device", default=argparse.SUPPRESS)

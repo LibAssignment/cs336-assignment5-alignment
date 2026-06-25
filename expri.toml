@@ -44,6 +44,16 @@ train-olmo2 = { command = [
   "--vllm-device", "cuda:1",
   "--rollout-every=1", "--validate-every=5",
 ], uv = true }
+train-olmo2-zero = { command = [
+  "python", "scripts/make.py", "train",
+  "--model", "olmo2-1B",
+  "--prompt", "r1_zero",
+  "--reward", "answer+format",
+  "--device", "cuda:0",
+  "--inference", "vllm",
+  "--vllm-device", "cuda:1",
+  "--rollout-every=1", "--validate-every=5",
+], uv = true }
 profile-olmo2 = { command = [
   "python", "scripts/make.py", "profile",
   "--model", "olmo2-1B",
