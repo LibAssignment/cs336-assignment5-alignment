@@ -58,6 +58,9 @@ def get_response_log_probs(
   mask: torch.Tensor | None = None, # shape (batch_size, seq_length)
   return_token_entropy: bool = False,
 ) -> ResponseLogProbs:
+  if isinstance(mask, bool):
+    return_token_entropy = mask
+    mask = None
   outputs = model(input_ids=input_ids, attention_mask=mask)
   output_logits: torch.Tensor = outputs.logits
   # print(output_logits.shape, labels.shape)

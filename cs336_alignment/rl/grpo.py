@@ -9,6 +9,9 @@ class GRPOTrainStepResult:
   log_probs: torch.Tensor | None
   advantages: torch.Tensor
   rewards: torch.Tensor
+  answer_lengths: torch.Tensor
+  seq_perplexity: float
+  answer_perplexity: float
   reward_metadata: dict[str, float] | None = None
 
   def metadata(self) -> dict[str, torch.Tensor]:
@@ -72,13 +75,23 @@ def grpo_train_step(
 
   final_loss = torch.tensor(0.0, device=device)
   final_log_probs = []
+  seq_log_prob_sum = torch.tensor(0.0, device=device)
+  seq_token_count = torch.tensor(0, device=device)
+  answer_log_prob_sum = torch.tensor(0.0, device=device)
+  answer_token_count = torch.tensor(0, device=device)
   for i in range(0, len(prompt_strs), macrobatch_size):
     x_batch = x[i:i+macrobatch_size].to(device)
     y_batch = y[i:i+macrobatch_size].to(device)
     mask_batch = tokenized.response_mask[i:i+macrobatch_size].to(device)
+    seq_mask_batch = y_batch != tokenizer.pad_token_id
+    attention_mask_batch = x_batch != tokenizer.pad_token_id
     adv_batch = advantages.advantages[i:i+macrobatch_size].to(device)
     old_log_probs_batch = old_log_probs[i:i+macrobatch_size].to(device) if old_log_probs is not None else None
-    log_probs = get_response_log_probs(model, x_batch, y_batch, mask=mask_batch, return_token_entropy=True)
+    log_probs = get_response_log_probs(model, x_batch, y_batch, mask=attention_mask_batch, return_token_entropy=True)
+    seq_log_prob_sum += (log_probs.log_probs * seq_mask_batch).sum().detach()
+    seq_token_count += seq_mask_batch.sum().detach()
+    answer_log_prob_sum += (log_probs.log_probs * mask_batch).sum().detach()
+    answer_token_count += mask_batch.sum().detach()
     loss_batch = compute_policy_gradient_loss(
       adv_batch,
       log_probs.log_probs,
@@ -108,5 +121,8 @@ def grpo_train_step(
     log_probs=torch.cat(final_log_probs, dim=0) if final_log_probs else None,
     advantages=advantages.advantages.detach().cpu(),
     rewards=rewards.raw_rewards.detach().cpu(),
+    answer_lengths=tokenized.response_mask.sum(dim=1).detach().cpu(),
+    seq_perplexity=torch.exp(-seq_log_prob_sum / seq_token_count.clamp(min=1)).item(),
+    answer_perplexity=torch.exp(-answer_log_prob_sum / answer_token_count.clamp(min=1)).item(),
     reward_metadata=rewards.metadata,
   )

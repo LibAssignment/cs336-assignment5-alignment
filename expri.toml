@@ -49,6 +49,7 @@ train-olmo2-zero = { command = [
   "--model", "olmo2-1B",
   "--prompt", "r1_zero",
   "--reward", "answer+format",
+  "--reward-format", "strict",
   "--device", "cuda:0",
   "--inference", "vllm",
   "--vllm-device", "cuda:1",

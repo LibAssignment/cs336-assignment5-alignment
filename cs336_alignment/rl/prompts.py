@@ -10,6 +10,7 @@ from ..vllm_utils import VLLMServer
 RewardFn = Callable[[str, str], dict[str, float]]
 ExtractFn = Callable[[str], str | None]
 RewardMode = Literal["answer", "answer+format"]
+RewardFormatMode = Literal["loose", "strict"]
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,33 @@ def with_reward_mode(reward_fn: RewardFn, reward_mode: RewardMode) -> RewardFn:
   return answer_plus_format_reward_fn
 
 
+def is_strict_r1_format(response: str) -> bool:
+  return re.fullmatch(r"\s*.+?</think> <answer>.+?</answer>\s*", response, flags=re.DOTALL) is not None
+
+
+def with_reward_format_mode(prompt_name: str, reward_fn: RewardFn, reward_format_mode: RewardFormatMode) -> RewardFn:
+  if reward_format_mode == "loose":
+    return reward_fn
+  if reward_format_mode != "strict":
+    raise ValueError(f"Unknown reward format mode: {reward_format_mode}")
+  if prompt_name == "question_only":
+    return reward_fn
+
+  def strict_format_reward_fn(response: str, ground_truth: str) -> dict[str, float]:
+    rewards = reward_fn(response, ground_truth)
+    if is_strict_r1_format(response):
+      return rewards
+    return {
+      **rewards,
+      "format_reward": 0.0,
+      "answer_reward": 0.0,
+      "reward": 0.0,
+    }
+
+  strict_format_reward_fn.__name__ = f"{reward_fn.__name__}_strict_format"
+  return strict_format_reward_fn
+
+
 def extract_r1_answer(response: str) -> str | None:
   if "<answer>" not in response or "</answer>" not in response:
     return None
@@ -76,26 +104,31 @@ def load_prompt_template(name: str) -> str:
     return f.read()
 
 
-def load_prompts(reward_mode: RewardMode = "answer") -> list[Prompt]:
+def prompt_reward_fn(name: str, reward_mode: RewardMode, reward_format_mode: RewardFormatMode) -> RewardFn:
+  reward_fn = with_reward_format_mode(name, PROMPT_REWARD_FNS[name], reward_format_mode)
+  return with_reward_mode(reward_fn, reward_mode)
+
+
+def load_prompts(reward_mode: RewardMode = "answer", reward_format_mode: RewardFormatMode = "loose") -> list[Prompt]:
   return [
     Prompt(
       name=name,
       template=load_prompt_template(name),
       extract=PROMPT_EXTRACT_FNS[name],
-      reward_fn=with_reward_mode(PROMPT_REWARD_FNS[name], reward_mode),
+      reward_fn=prompt_reward_fn(name, reward_mode, reward_format_mode),
     )
     for name in PROMPT_KINDS
   ]
 
 
-def get_prompt(name: str, reward_mode: RewardMode = "answer") -> Prompt:
+def get_prompt(name: str, reward_mode: RewardMode = "answer", reward_format_mode: RewardFormatMode = "loose") -> Prompt:
   if name not in PROMPT_KINDS:
     raise ValueError(f"Unknown prompt kind: {name}")
   return Prompt(
     name=name,
     template=load_prompt_template(name),
     extract=PROMPT_EXTRACT_FNS[name],
-    reward_fn=with_reward_mode(PROMPT_REWARD_FNS[name], reward_mode),
+    reward_fn=prompt_reward_fn(name, reward_mode, reward_format_mode),
   )
 
 

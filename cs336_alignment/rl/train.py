@@ -307,7 +307,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
   examples = load_gsm8k_examples(config.data_path, config.n_train_examples)
   validate_examples = load_gsm8k_examples(config.data_path.with_stem("test"), config.n_val_examples)
   rollout_prompt_count = config.num_rollout_prompts()
-  prompt = get_prompt(config.prompt, config.reward)
+  prompt = get_prompt(config.prompt, config.reward, config.reward_format)
   logger.info(
     "Rollout setup: rollout_batch_size=%d rollout_prompts=%d",
     config.rollout_batch_size,
@@ -422,6 +422,7 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
     )
     reward_values = result.rewards.float()
     advantage_values = result.advantages.float()
+    answer_lengths = result.answer_lengths.float()
     metrics = {
       "train/loss": result.loss.item(),
       "train/reward/mean": reward_values.mean().item(),
@@ -432,6 +433,12 @@ def train(config: TrainConfig, wandb_config: WandbConfig | None = None, job_conf
       "train/advantage/min": advantage_values.min().item(),
       "train/advantage/max": advantage_values.max().item(),
       "train/advantage/std": advantage_values.std(unbiased=False).item(),
+      "train/answer_len/mean": answer_lengths.mean().item(),
+      "train/answer_len/min": answer_lengths.min().item(),
+      "train/answer_len/max": answer_lengths.max().item(),
+      "train/answer_len/std": answer_lengths.std(unbiased=False).item(),
+      "train/seq_perplexity": result.seq_perplexity,
+      "train/answer_perplexity": result.answer_perplexity,
     }
     if result.reward_metadata is not None:
       for key, value in result.reward_metadata.items():
