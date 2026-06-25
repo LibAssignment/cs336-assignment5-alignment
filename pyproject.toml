@@ -25,6 +25,7 @@ gpu = [
     "flash-attn @ https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.11/flash_attn-2.8.3%2Bcu12torch2.11cxx11abiTRUE-cp313-cp313-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "torch",
     "torchvision",
+    "torchaudio",
     "vllm @ https://wheels.vllm.ai/04c2a8deac44fdb1ca3e2b5ec3e6bf16f3f6a914/vllm-0.23.1rc1.dev301%2Bg04c2a8dea.cu129-cp38-abi3-manylinux_2_28_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "sentencepiece>=0.2.1",
     "wandb>=0.26.0",
@@ -48,6 +49,9 @@ torch = [
     { index = "pytorch-cu129", extra = "gpu", marker = "sys_platform == 'linux'" },
 ]
 torchvision = [
+    { index = "pytorch-cu129", extra = "gpu", marker = "sys_platform == 'linux'" },
+]
+torchaudio = [
     { index = "pytorch-cu129", extra = "gpu", marker = "sys_platform == 'linux'" },
 ]
 # vllm = [

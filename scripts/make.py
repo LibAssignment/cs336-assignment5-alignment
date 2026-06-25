@@ -74,17 +74,37 @@ def extract_job_mode(values: list[str], default: str | None) -> tuple[str | None
   result = []
   for value in values:
     if value == "--job":
-      if mode == "no-job":
-        raise SystemExit("--job cannot be combined with --no-job")
       mode = "job"
       continue
     if value == "--no-job":
-      if mode == "job":
-        raise SystemExit("--job cannot be combined with --no-job")
       mode = "no-job"
       continue
     result.append(value)
   return mode, result
+
+
+def deduplicate_train_args(values: list[str]) -> list[str]:
+  entries: dict[tuple[str, object], tuple[int, list[str]]] = {}
+  positional_index = 0
+  index = 0
+  while index < len(values):
+    value = values[index]
+    if value.startswith("--"):
+      option, has_inline_value = value.split("=", maxsplit=1)[0], "=" in value
+      if has_inline_value:
+        entry = [value]
+      elif index + 1 < len(values) and not values[index + 1].startswith("--"):
+        entry = [value, values[index + 1]]
+        index += 1
+      else:
+        entry = [value]
+      key = ("flag", tuple(sorted(JOB_FLAGS))) if option in JOB_FLAGS else ("option", option)
+      entries[key] = (index, entry)
+    else:
+      entries[("positional", positional_index)] = (index, [value])
+      positional_index += 1
+    index += 1
+  return [arg for _, entry in sorted(entries.values(), key=lambda item: item[0]) for arg in entry]
 
 
 def train_command(train_args: list[str]) -> list[str]:
@@ -144,6 +164,7 @@ def cmd_smoke(args: argparse.Namespace) -> None:
 
 def cmd_train(args: argparse.Namespace) -> None:
   train_args = passthrough_args(args.train_args)
+  train_args = deduplicate_train_args(train_args)
   job_mode, train_args = extract_job_mode(train_args, args.job_mode)
   options = RunOptions(dry_run=args.dry_run, verbosity=args.verbosity, quiet=args.quiet)
   if args.smoke:
